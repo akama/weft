@@ -137,8 +137,11 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   let search_results : (log_entry list) Eio.Stream.t =
     Eio.Stream.create 1 in
 
-  Fun.protect (fun () ->
-    Eio.Switch.run @@ fun sw ->
+  Fun.protect ~finally:(fun () ->
+    Notty_unix.Term.release term;
+    Weft_connection.Conn_pool.close_all pool
+  ) (fun () ->
+    try Eio.Switch.run (fun sw ->
 
     (* Search fiber — picks up requests, runs search, posts results *)
     Eio.Fiber.fork ~sw (fun () ->
@@ -219,11 +222,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
         running := handle_terminal_event ()
     done;
 
-    Eio.Switch.fail sw Exit
-  ) ~finally:(fun () ->
-    Notty_unix.Term.release term;
-    Weft_connection.Conn_pool.close_all pool
-  )
+    Eio.Switch.fail sw Exit)
+    with Exit -> ())
 
 (* Run in dump mode *)
 let run_dump ~env ~formats_config ~sources_config ~initial_terms
