@@ -109,14 +109,15 @@ let read_new_lines ic =
 
 (* Tail using inotify for efficient file watching *)
 let tail t ~terms ~emit ~cancel
-    ?(on_rotation : rotation_callbacks option) () =
+    ?(on_rotation : rotation_callbacks option)
+    ?(drain_timeout = 5.0) () =
   let pattern = if terms = [] then None
     else Some (Re.compile (Re.Pcre.re (String.concat "|"
       (List.map Re.Pcre.quote terms)))) in
   let source = t.config.name in
 
   let drain_timeout = match on_rotation with
-    | Some _ -> 5.0  (* default drain timeout *)
+    | Some _ -> drain_timeout
     | None -> 0.0
   in
 
