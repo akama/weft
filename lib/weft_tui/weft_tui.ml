@@ -105,14 +105,22 @@ let narrow_range tr =
 let format_time_range = function
   | None -> "all time"
   | Some tr ->
-    let fmt t =
-      let ((_y, mo, d), ((hh, mm, ss), _)) = Ptime.to_date_time t in
-      Printf.sprintf "%02d-%02d %02d:%02d:%02d" mo d hh mm ss
-    in
-    let start_s = fmt tr.start_ in
+    let date t = let ((_y, mo, d), _) = Ptime.to_date_time t in (mo, d) in
+    let time t = let (_, ((hh, mm, ss), _)) = Ptime.to_date_time t in
+      Printf.sprintf "%02d:%02d:%02d" hh mm ss in
+    let fmt_date (mo, d) = Printf.sprintf "%02d-%02d" mo d in
+    let start_t = time tr.start_ in
     match tr.end_ with
-    | None -> Printf.sprintf "%s -> now" start_s
-    | Some e -> Printf.sprintf "%s -> %s" start_s (fmt e)
+    | None ->
+      Printf.sprintf "%s: %s -> now" (fmt_date (date tr.start_)) start_t
+    | Some e ->
+      let sd = date tr.start_ in
+      let ed = date e in
+      if sd = ed then
+        Printf.sprintf "%s: %s -> %s" (fmt_date sd) start_t (time e)
+      else
+        Printf.sprintf "%s %s -> %s %s"
+          (fmt_date sd) start_t (fmt_date ed) (time e)
 
 (* Handle keyboard input *)
 let handle_key model key =
