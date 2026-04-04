@@ -18,23 +18,21 @@ let clear t =
   t.updated_at <- 0.0
 
 let render t ~width =
-  if t.message = "" then I.empty
+  let age = if t.message = "" then 999.0
+    else Unix.gettimeofday () -. t.updated_at in
+  let attr =
+    if age < 5.0 then A.(fg lightyellow)
+    else if age < 10.0 then A.(fg lightblack)
+    else (t.message <- ""; A.(fg lightblack))
+  in
+  if t.message = "" then
+    (* Always render a 1-high line to keep layout stable *)
+    I.string A.empty (String.make width ' ')
   else
-    let age = Unix.gettimeofday () -. t.updated_at in
-    (* Fade after 10 seconds *)
-    let attr = if age < 5.0 then A.(fg lightyellow)
-      else if age < 10.0 then A.(fg lightblack)
-      else begin
-        t.message <- "";
-        A.empty
-      end
-    in
-    if t.message = "" then I.empty
-    else
-      let msg = if String.length t.message > width - 2 then
-        String.sub t.message 0 (width - 2)
-      else t.message in
-      I.string attr (" " ^ msg) |> I.hsnap ~align:`Left width
+    let msg = if String.length t.message > width - 2 then
+      String.sub t.message 0 (width - 2)
+    else t.message in
+    I.string attr (" " ^ msg) |> I.hsnap ~align:`Left width
 
 (* Global instance — modules can set status without passing the ref around *)
 let global = create ()
