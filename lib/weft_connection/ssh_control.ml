@@ -96,7 +96,12 @@ let run_command_lines t args =
 (* Run a long-lived SSH command, calling on_line for stdout and on_stderr
    for stderr. Uses Unix.open_process_full for separate channels.
    Multiplexes both with Unix.select. *)
-let run_streaming t args ~on_line ~on_stderr ~cancel =
+let default_wait_fds fds timeout =
+  let (ready, _, _) = Unix.select fds [] [] timeout in
+  ready
+
+let run_streaming t args ~on_line ~on_stderr ~cancel
+    ?(wait_fds = default_wait_fds) () =
   let (base, host_args) = parse_transport t.transport_cmd in
   let is_tsh = base = "tsh" in
   let cmd_parts = if is_tsh then
@@ -149,7 +154,7 @@ let run_streaming t args ~on_line ~on_stderr ~cancel =
   Fun.protect (fun () ->
     try
       while not (Atomic.get cancel) do
-        let ready, _, _ = Unix.select [stdout_fd; stderr_fd] [] [] 0.5 in
+        let ready = wait_fds [stdout_fd; stderr_fd] 0.5 in
         List.iter (fun fd ->
           if fd = stdout_fd then
             read_lines_from stdout_fd stdout_buf on_line

@@ -233,11 +233,20 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                  Weft_tui.Status.set model.status
                    (Printf.sprintf "Rotation: new segment for %s" src.name));
              } in
+             (* Eio-aware wait: yields to scheduler instead of blocking *)
+             let eio_wait_readable fd timeout =
+               match Eio.Time.with_timeout clock timeout (fun () ->
+                 Eio_unix.await_readable fd; Ok true
+               ) with
+               | Ok true -> true
+               | Ok false -> false
+               | Error `Timeout -> false
+             in
              (try
                 Weft_source.Local_file.tail adapter ~terms:[]
                   ~emit:(fun entry -> emit_line src.name entry.raw)
                   ~cancel:tail_cancel ~on_rotation:rotation_cbs
-                  ~drain_timeout ()
+                  ~drain_timeout ~wait_readable:eio_wait_readable ()
               with exn ->
                 Weft_tui.Status.set model.status
                   (Printf.sprintf "Tail %s ended: %s" src.name
@@ -258,6 +267,29 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                 Weft_tui.Status.set model.status
                   (Printf.sprintf "Tailing %s via SSH..." src.name);
                 let tail_cmd = ["tail"; "-n"; "0"; "-F"; path] in
+                let eio_wait_fds fds timeout =
+                  (* Wait for any fd to be readable, Eio-cooperatively.
+                     We check each fd — first one ready wins. *)
+                  match Eio.Time.with_timeout clock timeout (fun () ->
+                    (* Try each fd in turn with a tiny timeout *)
+                    let ready = ref [] in
+                    let found = ref false in
+                    while not !found do
+                      List.iter (fun fd ->
+                        if not !found then
+                          let r, _, _ = Unix.select [fd] [] [] 0.0 in
+                          if r <> [] then begin
+                            ready := fd :: !ready;
+                            found := true
+                          end
+                      ) fds;
+                      if not !found then Eio.Fiber.yield ()
+                    done;
+                    Ok !ready
+                  ) with
+                  | Ok ready -> ready
+                  | Error `Timeout -> []
+                in
                 (try
                    Weft_connection.Ssh_control.run_streaming ssh tail_cmd
                      ~on_line:(fun line -> emit_line src.name line)
@@ -271,6 +303,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                            (Printf.sprintf "SSH truncate: %s" src.name)
                        | None -> ())
                      ~cancel:tail_cancel
+                     ~wait_fds:eio_wait_fds ()
                  with Failure msg ->
                    Weft_tui.Status.set model.status
                      (Printf.sprintf "SSH tail %s: %s" src.name msg))
@@ -539,7 +572,7 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
                          src.name path
                      | None ->
                        Printf.eprintf "SSH stderr [%s]: %s\n%!" src.name line)
-                   ~cancel
+                   ~cancel ()
                with Failure msg ->
                  Printf.eprintf "SSH tail for %s ended: %s\n%!" src.name msg)
             )
