@@ -222,6 +222,10 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   in
   update_source_statuses ();
 
+  (* Wire status callback so search progress shows in the TUI *)
+  Weft_search.set_status_callback (fun msg ->
+    Weft_tui.Status.set model.status msg);
+
   let term = Notty_unix.Term.create () in
   let (w, h) = Notty_unix.Term.size term in
   model.width <- w;

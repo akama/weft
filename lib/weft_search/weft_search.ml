@@ -12,6 +12,13 @@ type source_adapter = {
 type loki_query_fn =
   url:string -> headers:(string * string) list -> string option
 
+(* Status callback — set by the TUI to capture progress messages *)
+let status_callback : (string -> unit) ref = ref (fun msg ->
+  Printf.eprintf "%s\n%!" msg)
+
+let set_status_callback f = status_callback := f
+let report_status msg = !status_callback msg
+
 type t = {
   term_manager : Term_manager.t;
   cache : Weft_cache.t;
@@ -206,8 +213,8 @@ let ensure_cached ?t_opt ?time_range adapter cache =
     | Remote ->
       (match adapter.ssh, adapter.config.path with
        | Some ssh, Some path ->
-         Printf.eprintf "Fetching %s from %s...\n%!"
-           path (Option.value ~default:"remote" adapter.config.transport);
+         report_status (Printf.sprintf "Fetching %s from %s..."
+           path (Option.value ~default:"remote" adapter.config.transport));
          (match fetch_remote_file ssh path with
           | Some data ->
             cache_string_data cache ~source_name:adapter.name
@@ -219,8 +226,8 @@ let ensure_cached ?t_opt ?time_range adapter cache =
             let needed = Weft_cache.archives_needed_for_range cache
               ~source_name:adapter.name ~time_range:tr in
             if needed <> [] then begin
-              Printf.eprintf "  Fetching %d archives for time range gap...\n%!"
-                (List.length needed);
+              report_status (Printf.sprintf "Fetching %d archives for gap..."
+                (List.length needed));
               List.iter (fun (archive : archive_info) ->
                 let origin = Filename.basename archive.remote_path in
                 match fetch_remote_archive ssh archive.remote_path with
@@ -265,7 +272,7 @@ let ensure_cached ?t_opt ?time_range adapter cache =
                  | None -> [])
               | _ -> []
             in
-            Printf.eprintf "Querying Loki at %s...\n%!" base_url;
+            report_status (Printf.sprintf "Querying Loki at %s..." base_url);
             (match query_fn ~url ~headers with
              | Some body ->
                let entries = Weft_source.Loki.parse_query_response
