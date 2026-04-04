@@ -189,88 +189,113 @@ let discover_and_cache_remote_archives adapter cache ssh =
       ) archives
     end
 
-(* Read lines for a source — check cache first, fetch if needed *)
-let read_source_lines ?t_opt adapter cache =
-  if Weft_cache.is_cached cache ~source_name:adapter.name then
-    Weft_cache.read_cached_lines cache ~source_name:adapter.name
+(* Ensure source data is cached, fetching if needed *)
+let ensure_cached ?t_opt ?time_range adapter cache =
+  if Weft_cache.is_cached cache ~source_name:adapter.name then ()
   else begin
-    (match adapter.config.source_type with
-     | File ->
-       (* Local file — read directly *)
-       (match adapter.config.path with
-        | Some path when Sys.file_exists path ->
-          ignore (Weft_cache.cache_file cache
-            ~source_name:adapter.name
-            ~origin:(Filename.basename path) ~path)
-        | _ -> ());
-       discover_and_cache_local_archives adapter cache
+    match adapter.config.source_type with
+    | File ->
+      (match adapter.config.path with
+       | Some path when Sys.file_exists path ->
+         ignore (Weft_cache.cache_file cache
+           ~source_name:adapter.name
+           ~origin:(Filename.basename path) ~path)
+       | _ -> ());
+      discover_and_cache_local_archives adapter cache
 
-     | Remote ->
-       (* Remote file — fetch via SSH *)
-       (match adapter.ssh, adapter.config.path with
-        | Some ssh, Some path ->
-          Printf.eprintf "Fetching %s from %s...\n%!"
-            path (Option.value ~default:"remote" adapter.config.transport);
-          (match fetch_remote_file ssh path with
-           | Some data ->
-             cache_string_data cache ~source_name:adapter.name
-               ~origin:(Filename.basename path) data
-           | None -> ());
-          discover_and_cache_remote_archives adapter cache ssh
-        | _ ->
-          Printf.eprintf "Warning: remote source %s has no SSH connection\n"
-            adapter.name)
+    | Remote ->
+      (match adapter.ssh, adapter.config.path with
+       | Some ssh, Some path ->
+         Printf.eprintf "Fetching %s from %s...\n%!"
+           path (Option.value ~default:"remote" adapter.config.transport);
+         (match fetch_remote_file ssh path with
+          | Some data ->
+            cache_string_data cache ~source_name:adapter.name
+              ~origin:(Filename.basename path) data
+          | None -> ());
+         (* Only fetch archives needed for the requested range *)
+         (match time_range with
+          | Some tr ->
+            let needed = Weft_cache.archives_needed_for_range cache
+              ~source_name:adapter.name ~time_range:tr in
+            if needed <> [] then begin
+              Printf.eprintf "  Fetching %d archives for time range gap...\n%!"
+                (List.length needed);
+              List.iter (fun (archive : archive_info) ->
+                let origin = Filename.basename archive.remote_path in
+                match fetch_remote_archive ssh archive.remote_path with
+                | Some data ->
+                  cache_string_data cache ~source_name:adapter.name ~origin data
+                | None -> ()
+              ) needed
+            end
+          | None ->
+            discover_and_cache_remote_archives adapter cache ssh)
+       | _ ->
+         Printf.eprintf "Warning: remote source %s has no SSH connection\n"
+           adapter.name)
 
-     | Loki ->
-       (* Query Loki API, cache results *)
-       (match t_opt with
-        | Some t ->
-          (match t.loki_query, adapter.config.url with
-           | Some query_fn, Some base_url ->
-             let default_labels = Option.value ~default:"{}" adapter.config.default_labels in
-             let logql = default_labels in
-             let now_ns = Printf.sprintf "%Ld"
-               (Int64.mul (Int64.of_float (Unix.gettimeofday ())) 1_000_000_000L) in
-             let hour_ago_ns = Printf.sprintf "%Ld"
-               (Int64.mul (Int64.of_float (Unix.gettimeofday () -. 3600.0)) 1_000_000_000L) in
-             let url = Printf.sprintf
-               "%s/loki/api/v1/query_range?query=%s&start=%s&end=%s&limit=5000&direction=forward"
-               base_url (Uri.pct_encode logql) hour_ago_ns now_ns in
-             let headers = match adapter.config.auth with
-               | Bearer { token_env } ->
-                 (match Sys.getenv_opt token_env with
-                  | Some tok -> [("Authorization", "Bearer " ^ tok)]
-                  | None -> [])
-               | _ -> []
-             in
-             Printf.eprintf "Querying Loki at %s...\n%!" base_url;
-             (match query_fn ~url ~headers with
-              | Some body ->
-                let entries = Weft_source.Loki.parse_query_response
-                  ~source:adapter.name body in
-                (* Cache the raw lines *)
-                let data = String.concat "\n"
-                  (List.map (fun (e : log_entry) -> e.raw) entries) in
-                if data <> "" then
-                  cache_string_data cache ~source_name:adapter.name
-                    ~origin:"loki-query" data
+    | Loki ->
+      (match t_opt with
+       | Some t ->
+         (match t.loki_query, adapter.config.url with
+          | Some query_fn, Some base_url ->
+            let default_labels = Option.value ~default:"{}" adapter.config.default_labels in
+            let logql = default_labels in
+            (* Scope the Loki query to the requested time range *)
+            let (start_ns, end_ns) = match time_range with
+              | Some tr ->
+                let to_ns t = Printf.sprintf "%Ld"
+                  (Int64.mul (Int64.of_float (Ptime.to_float_s t)) 1_000_000_000L) in
+                let end_t = match tr.end_ with
+                  | Some e -> e | None -> Ptime_clock.now () in
+                (to_ns tr.start_, to_ns end_t)
               | None ->
-                Printf.eprintf "Warning: Loki query returned no data\n")
-           | _ ->
-             Printf.eprintf "Warning: Loki source %s has no query function or URL\n"
-               adapter.name)
-        | None ->
-          Printf.eprintf "Warning: Loki source %s cannot query without runtime\n"
-            adapter.name)
+                let now = Unix.gettimeofday () in
+                (Printf.sprintf "%Ld" (Int64.mul (Int64.of_float (now -. 3600.0)) 1_000_000_000L),
+                 Printf.sprintf "%Ld" (Int64.mul (Int64.of_float now) 1_000_000_000L))
+            in
+            let url = Printf.sprintf
+              "%s/loki/api/v1/query_range?query=%s&start=%s&end=%s&limit=5000&direction=forward"
+              base_url (Uri.pct_encode logql) start_ns end_ns in
+            let headers = match adapter.config.auth with
+              | Bearer { token_env } ->
+                (match Sys.getenv_opt token_env with
+                 | Some tok -> [("Authorization", "Bearer " ^ tok)]
+                 | None -> [])
+              | _ -> []
+            in
+            Printf.eprintf "Querying Loki at %s...\n%!" base_url;
+            (match query_fn ~url ~headers with
+             | Some body ->
+               let entries = Weft_source.Loki.parse_query_response
+                 ~source:adapter.name body in
+               let data = String.concat "\n"
+                 (List.map (fun (e : log_entry) -> e.raw) entries) in
+               if data <> "" then
+                 cache_string_data cache ~source_name:adapter.name
+                   ~origin:"loki-query" data
+             | None ->
+               Printf.eprintf "Warning: Loki query returned no data\n")
+          | _ ->
+            Printf.eprintf "Warning: Loki source %s has no query function or URL\n"
+              adapter.name)
+       | None ->
+         Printf.eprintf "Warning: Loki source %s cannot query without runtime\n"
+           adapter.name)
 
-     | Directory -> ()
-    );
-    Weft_cache.read_cached_lines cache ~source_name:adapter.name
+    | Directory -> ()
   end
 
+(* Read lines for a source — ensure cached, then read overlapping segments *)
+let read_source_lines ?t_opt ?time_range adapter cache =
+  ensure_cached ?t_opt ?time_range adapter cache;
+  Weft_cache.read_cached_lines_in_range cache
+    ~source_name:adapter.name ~time_range
+
 (* Batch search for a single source *)
-let search_source ctx adapter ~terms ~time_range =
-  let lines = read_source_lines ~t_opt:ctx adapter ctx.cache in
+let search_source ctx adapter ~terms ~(time_range : time_range option) =
+  let lines = read_source_lines ~t_opt:ctx ?time_range adapter ctx.cache in
   if lines = [] then Seq.empty
   else begin
     let entries = process_through_pipeline adapter.pipeline ~source:adapter.name lines in
@@ -303,10 +328,21 @@ let search ctx ~time_range =
     ) ctx.sources in
     Weft_merge.Batch_merge.merge_with_dedup streams
 
-let load_all ctx =
+let load_all ?time_range ctx =
   let streams = List.map (fun adapter ->
-    let lines = read_source_lines ~t_opt:ctx adapter ctx.cache in
+    let lines = read_source_lines ~t_opt:ctx ?time_range adapter ctx.cache in
     let entries = process_through_pipeline adapter.pipeline ~source:adapter.name lines in
+    (* Post-filter by time range since segments are coarse *)
+    let entries = match time_range with
+      | None -> entries
+      | Some tr ->
+        List.filter (fun (e : log_entry) ->
+          Ptime.is_later e.timestamp ~than:tr.start_ &&
+          (match tr.end_ with
+           | None -> true
+           | Some end_t -> Ptime.is_earlier e.timestamp ~than:end_t)
+        ) entries
+    in
     (adapter.name, List.to_seq entries)
   ) ctx.sources in
   Weft_merge.Batch_merge.merge streams

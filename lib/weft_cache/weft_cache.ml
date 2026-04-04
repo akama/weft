@@ -96,6 +96,92 @@ let read_cached_lines t ~source_name =
       Segment.read_lines ~fs:t.fs ~dir seg
     ) sorted
 
+(* Read cached lines, optionally filtering to segments overlapping a time range *)
+let read_cached_lines_in_range t ~source_name ~(time_range : Weft_types.time_range option) =
+  let dir = Filename.concat t.base_dir source_name in
+  match get_manifest t source_name with
+  | None -> []
+  | Some manifest ->
+    let sorted = List.sort (fun (a : segment) (b : segment) ->
+      Ptime.compare a.time_range.start_ b.time_range.start_
+    ) manifest.segments in
+    (* Filter to segments that overlap the requested range *)
+    let overlapping = match time_range with
+      | None -> sorted
+      | Some tr ->
+        List.filter (fun (seg : segment) ->
+          (* Segment overlaps if it doesn't end before range starts
+             and doesn't start after range ends *)
+          let seg_before = match seg.time_range.end_ with
+            | Some seg_end -> Ptime.is_earlier seg_end ~than:tr.start_
+            | None -> false  (* open-ended segment always overlaps *)
+          in
+          let seg_after = match tr.end_ with
+            | Some range_end -> Ptime.is_later seg.time_range.start_ ~than:range_end
+            | None -> false  (* open-ended range always includes *)
+          in
+          not seg_before && not seg_after
+        ) sorted
+    in
+    let skipped = List.length sorted - List.length overlapping in
+    if skipped > 0 then
+      Printf.eprintf "  %s: reading %d/%d segments (skipped %d outside range)\n%!"
+        source_name (List.length overlapping) (List.length sorted) skipped;
+    List.concat_map (fun seg ->
+      Segment.read_lines ~fs:t.fs ~dir seg
+    ) overlapping
+
+(* Check which archives are needed to cover a gap in the requested range *)
+let rec archives_needed_for_range t ~source_name ~(time_range : Weft_types.time_range) =
+  match get_manifest t source_name with
+  | None -> []
+  | Some manifest ->
+    let coverage = time_coverage_of_segments manifest.segments in
+    match coverage with
+    | None -> manifest.known_archives  (* nothing cached, need all *)
+    | Some cached_range ->
+      (* Find the uncovered portion of the requested range *)
+      let need_earlier = Ptime.is_earlier time_range.start_ ~than:cached_range.start_ in
+      let need_later = match time_range.end_, cached_range.end_ with
+        | Some req_end, Some cache_end -> Ptime.is_later req_end ~than:cache_end
+        | Some _, None -> false  (* cache is open-ended *)
+        | None, _ -> true
+      in
+      if not need_earlier && not need_later then
+        []  (* fully covered *)
+      else
+        (* Return archives whose mtime falls in the gap *)
+        List.filter (fun (a : Weft_types.archive_info) ->
+          match a.mtime with
+          | None -> true  (* unknown time — fetch to be safe *)
+          | Some mt ->
+            (need_earlier && Ptime.is_earlier mt ~than:cached_range.start_) ||
+            (need_later && match cached_range.end_ with
+              | Some ce -> Ptime.is_later mt ~than:ce
+              | None -> false)
+        ) manifest.known_archives
+
+and time_coverage_of_segments segments =
+  if segments = [] then None
+  else
+    let earliest = List.fold_left (fun acc (s : Weft_types.segment) ->
+      match acc with
+      | None -> Some s.time_range.start_
+      | Some t -> Some (if Ptime.is_earlier s.time_range.start_ ~than:t
+                        then s.time_range.start_ else t)
+    ) None segments in
+    let latest = List.fold_left (fun acc (s : Weft_types.segment) ->
+      match s.time_range.end_ with
+      | None -> Some (Ptime_clock.now ())
+      | Some e ->
+        match acc with
+        | None -> Some e
+        | Some t -> Some (if Ptime.is_later e ~than:t then e else t)
+    ) None segments in
+    match earliest, latest with
+    | Some s, Some e -> Some Weft_types.{ start_ = s; end_ = Some e }
+    | _ -> None
+
 let time_coverage t source_name =
   match get_manifest t source_name with
   | None -> None

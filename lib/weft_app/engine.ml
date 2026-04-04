@@ -361,21 +361,10 @@ let run_dump ~env ~formats_config ~sources_config ~initial_terms
   ignore pool;
 
   let has_terms = initial_terms <> [] in
-  let all_entries = if has_terms then
+  let entries = if has_terms then
     Weft_search.search search ~time_range
   else
-    Weft_search.load_all search
-  in
-  (* Apply time range filter for load_all *)
-  let entries = match time_range, has_terms with
-    | Some tr, false ->
-      Seq.filter (fun (entry : Weft_types.log_entry) ->
-        Ptime.is_later entry.timestamp ~than:tr.start_ &&
-        (match tr.end_ with
-         | None -> true
-         | Some end_t -> Ptime.is_earlier entry.timestamp ~than:end_t)
-      ) all_entries
-    | _ -> all_entries
+    Weft_search.load_all ?time_range search
   in
   let count = ref 0 in
   let rec print_seq seq =
