@@ -3,4 +3,5 @@
  (public_name weft.app)
  (libraries weft_types weft_config weft_cache weft_connection
             weft_source weft_search weft_tui weft_merge eio eio_main
-            notty.unix yojson ptime.clock.os cohttp-eio http uri))
+            notty.unix yojson ptime.clock.os cohttp-eio http uri
+            eio.unix))
