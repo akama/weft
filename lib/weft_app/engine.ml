@@ -254,13 +254,22 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       | `Mouse _ | `Paste _ -> true
     in
 
+    (* select that retries on EINTR (from SIGWINCH etc) *)
+    let select_no_eintr fds timeout =
+      let rec retry () =
+        try Unix.select fds [] [] timeout
+        with Unix.Unix_error (Unix.EINTR, _, _) -> retry ()
+      in
+      let (ready, _, _) = retry () in
+      ready
+    in
+
     let running = ref true in
     while !running do
       let img = Weft_tui.render model in
       Notty_unix.Term.image term img;
 
-      (* Check if terminal has input ready (50ms timeout) *)
-      let ready, _, _ = Unix.select [input_fd] [] [] 0.05 in
+      let ready = select_no_eintr [input_fd] 0.05 in
       if ready <> [] || Notty_unix.Term.pending term then
         running := handle_terminal_event ()
     done
