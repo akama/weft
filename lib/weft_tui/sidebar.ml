@@ -8,20 +8,22 @@ type t = {
   mutable selected_term : int;
   mutable cache_size_mb : int;
   mutable cache_segments : int;
-  mutable cache_time_range : string;
+  mutable cache_from : string;
+  mutable cache_to : string;
 }
 
 let create () =
   { sources = []; disabled_sources = [];
     selected_source = 0; selected_term = 0;
     cache_size_mb = 0; cache_segments = 0;
-    cache_time_range = "" }
+    cache_from = ""; cache_to = "" }
 
 let update_sources t sources = t.sources <- sources
-let update_cache_info t ~size_mb ~segments ~time_range =
+let update_cache_info t ~size_mb ~segments ~cache_from ~cache_to =
   t.cache_size_mb <- size_mb;
   t.cache_segments <- segments;
-  t.cache_time_range <- time_range
+  t.cache_from <- cache_from;
+  t.cache_to <- cache_to
 
 let source_count t = List.length t.sources
 let term_count terms = List.length terms
@@ -89,13 +91,21 @@ let render_terms ~(terms : search_term list) ~selected ~width ~is_focused =
 
 let render_cache t ~width =
   let title = I.string Theme.title_attr "CACHE" in
-  let _ = width in
+  ignore width;
+  let size_str = if t.cache_size_mb > 0 then
+    Printf.sprintf " %d MB" t.cache_size_mb
+  else " <1 MB" in
   let lines = [
-    I.string Theme.dim_attr (Printf.sprintf " %d MB" t.cache_size_mb);
-    I.string Theme.dim_attr (Printf.sprintf " %d segments" t.cache_segments);
-    I.string Theme.dim_attr (Printf.sprintf " %s" t.cache_time_range);
+    I.string Theme.dim_attr size_str;
+    I.string Theme.dim_attr (Printf.sprintf " %d segs" t.cache_segments);
   ] in
-  I.vcat (title :: lines)
+  let range_lines = if t.cache_from <> "" then [
+    I.string Theme.dim_attr " from:";
+    I.string Theme.dim_attr (Printf.sprintf "  %s" t.cache_from);
+    I.string Theme.dim_attr " to:";
+    I.string Theme.dim_attr (Printf.sprintf "  %s" t.cache_to);
+  ] else [] in
+  I.vcat (title :: lines @ range_lines)
 
 let render t ~terms ~width ~height ~focus =
   let sources = render_sources t ~width ~is_focused:(focus = `Sources) in
