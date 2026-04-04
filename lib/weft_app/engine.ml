@@ -176,25 +176,38 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
         Weft_middleware.Pipeline.create_stream_state pl ~source:src.name
       ) pipeline in
 
-      (* Active cache segment for this source's tail data *)
-      let tail_seg = Weft_cache.new_segment cache
-        ~source_name:src.name ~origin:"tail" in
-      ignore tail_seg;
+      (* Active cache segment for this source's tail data (design §17).
+         Mutable so rotation can seal the old and swap in a new one. *)
+      let active_seg = ref (Weft_cache.new_segment cache
+        ~source_name:src.name ~origin:"tail") in
       let cache_buf = Buffer.create 4096 in
-      let cache_flush_interval = 50 in  (* flush every N lines *)
       let cache_line_count = ref 0 in
+      let cache_flush_interval = 50 in
 
       let flush_cache_buf () =
         if Buffer.length cache_buf > 0 then begin
           let data = Buffer.contents cache_buf in
           Buffer.clear cache_buf;
           ignore (Weft_cache.store_data cache ~source_name:src.name
-            tail_seg data)
+            !active_seg data)
         end
       in
 
+      let seal_active_seg () =
+        flush_cache_buf ();
+        let end_time = Ptime_clock.now () in
+        ignore (Weft_cache.seal_segment cache
+          ~source_name:src.name !active_seg ~end_time)
+      in
+
+      let new_active_seg origin =
+        active_seg := Weft_cache.new_segment cache
+          ~source_name:src.name ~origin;
+        cache_line_count := 0
+      in
+
       let emit_line source line =
-        (* Write raw line to cache segment *)
+        (* Write raw line to active cache segment *)
         Buffer.add_string cache_buf line;
         Buffer.add_char cache_buf '\n';
         incr cache_line_count;
@@ -249,11 +262,11 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
              in
              let rotation_cbs : Weft_source.Local_file.rotation_callbacks = {
                on_seal = (fun () ->
+                 seal_active_seg ();
                  Weft_tui.Status.set model.status
                    (Printf.sprintf "Rotation: sealed %s" src.name));
                on_new = (fun () ->
-                 ignore (Weft_cache.new_segment cache
-                   ~source_name:src.name ~origin:(Filename.basename path));
+                 new_active_seg (Filename.basename path ^ " (post-rotate)");
                  Weft_tui.Status.set model.status
                    (Printf.sprintf "Rotation: new segment for %s" src.name));
              } in
