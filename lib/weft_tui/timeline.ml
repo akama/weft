@@ -70,6 +70,29 @@ let scroll_down t =
       t.scroll_offset <- t.selected - t.visible_height + 1
   end
 
+let page_up t =
+  let jump = max 1 (t.visible_height - 1) in
+  t.selected <- max 0 (t.selected - jump);
+  t.scroll_offset <- max 0 (t.scroll_offset - jump)
+
+let page_down t =
+  let n = Array.length t.entries in
+  let jump = max 1 (t.visible_height - 1) in
+  t.selected <- min (n - 1) (t.selected + jump);
+  let max_offset = max 0 (n - t.visible_height) in
+  t.scroll_offset <- min max_offset (t.scroll_offset + jump)
+
+let goto_top t =
+  t.selected <- 0;
+  t.scroll_offset <- 0
+
+let goto_bottom t =
+  let n = Array.length t.entries in
+  if n > 0 then begin
+    t.selected <- n - 1;
+    t.scroll_offset <- max 0 (n - t.visible_height)
+  end
+
 let set_visible_height t h =
   t.visible_height <- max 1 h
 

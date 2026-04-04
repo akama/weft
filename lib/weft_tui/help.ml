@@ -6,7 +6,10 @@ let render ~width ~height =
     (A.empty, "");
     (A.(fg lightyellow), "Navigation");
     (A.empty, "  j/k, Up/Down   Scroll timeline (or sidebar list)");
-    (A.empty, "  Tab            Cycle focus: Sources → Terms → Timeline");
+    (A.empty, "  PgUp/PgDn      Page up / page down");
+    (A.empty, "  g / G          Go to top / bottom");
+    (A.empty, "  Home / End     Go to top / bottom");
+    (A.empty, "  Tab            Cycle focus: Sources > Terms > Timeline");
     (A.empty, "  Enter          Toggle detail pane");
     (A.empty, "  q              Quit");
     (A.empty, "");
