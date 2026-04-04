@@ -45,6 +45,18 @@ let tag_terms terms (entry : log_entry) =
   ) terms in
   { entry with terms = matched }
 
+(* Read raw lines from a local file *)
+let read_file_lines path =
+  try
+    let ic = open_in path in
+    let lines = ref [] in
+    (try while true do
+       lines := input_line ic :: !lines
+     done with End_of_file -> ());
+    close_in ic;
+    List.rev !lines
+  with _ -> []
+
 (* Process raw lines through a pipeline *)
 let process_through_pipeline pipeline ~source lines =
   match pipeline with
@@ -62,20 +74,30 @@ let process_through_pipeline pipeline ~source lines =
   | Some pl ->
     Weft_middleware.Pipeline.process_lines pl ~source lines
 
-(* Batch search for a single source *)
-let search_source _t adapter ~terms ~time_range =
-  if adapter.has_multiline then begin
-    (* Multiline: scan from cache *)
-    let lines = Weft_cache.read_cached_lines _t.cache ~source_name:adapter.name in
+(* Read lines for a source — from file, cache, or grep *)
+let read_source_lines adapter cache =
+  (* Try reading from the file directly first *)
+  let from_file = match adapter.config.path with
+    | Some path when Sys.file_exists path -> read_file_lines path
+    | _ -> []
+  in
+  if from_file <> [] then from_file
+  else
+    (* Fall back to cache *)
+    Weft_cache.read_cached_lines cache ~source_name:adapter.name
+
+(* Batch search for a single source — reads file, runs pipeline, filters *)
+let search_source t adapter ~terms ~time_range =
+  let lines = read_source_lines adapter t.cache in
+  if lines = [] then Seq.empty
+  else begin
     let entries = process_through_pipeline adapter.pipeline ~source:adapter.name lines in
-    let terms_set = terms in
+    (* Filter by search terms *)
+    let term_res = List.map (fun term ->
+      (term, Re.compile (Re.Pcre.re (Re.Pcre.quote term)))
+    ) terms in
     let filtered = List.filter (fun (entry : log_entry) ->
-      List.exists (fun term ->
-        try
-          let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
-          Re.execp re entry.raw
-        with _ -> false
-      ) terms_set
+      List.exists (fun (_term, re) -> Re.execp re entry.raw) term_res
     ) entries in
     let tagged = List.map (tag_terms terms) filtered in
     (* Filter by time range *)
@@ -90,9 +112,7 @@ let search_source _t adapter ~terms ~time_range =
         ) tagged
     in
     List.to_seq in_range
-  end else
-    (* Simple format: grep returns empty for now — would need source handle *)
-    Seq.empty
+  end
 
 (* Full batch search across all sources *)
 let search t ~time_range =
@@ -104,26 +124,20 @@ let search t ~time_range =
     ) t.sources in
     Weft_merge.Batch_merge.merge_with_dedup streams
 
+(* Search without terms — just load and merge all entries from all sources *)
+let load_all t =
+  let streams = List.map (fun adapter ->
+    let lines = read_source_lines adapter t.cache in
+    let entries = process_through_pipeline adapter.pipeline ~source:adapter.name lines in
+    (adapter.name, List.to_seq entries)
+  ) t.sources in
+  Weft_merge.Batch_merge.merge streams
+
 (* Add a new search term with incremental catch-up *)
 let add_term t term_str =
   match Term_manager.add_term t.term_manager term_str with
-  | None -> None (* duplicate *)
+  | None -> None
   | Some search_term ->
-    (* Step 1: would restart tail with updated terms (tail-first strategy) *)
-    (* Step 2: catch-up from cache for the new term *)
-    let _catchup_entries = List.concat_map (fun adapter ->
-      if adapter.has_multiline then begin
-        let lines = Weft_cache.read_cached_lines t.cache ~source_name:adapter.name in
-        let entries = process_through_pipeline adapter.pipeline ~source:adapter.name lines in
-        List.filter (fun (entry : log_entry) ->
-          try
-            let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term_str)) in
-            Re.execp re entry.raw
-          with _ -> false
-        ) entries
-      end else
-        []
-    ) t.sources in
     Some search_term
 
 let remove_term t term_str =

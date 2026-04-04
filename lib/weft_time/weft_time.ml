@@ -18,7 +18,7 @@ let epoch_millis_re =
 
 let common_log_re =
   Re.compile (Re.Pcre.re
-    {|\[(\d{2})/(\w{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2})\s*([+-]\d{4})?\]|})
+    {|\[?(\d{2})/(\w{3})/(\d{4}):(\d{2}):(\d{2}):(\d{2})\s*([+-]\d{4})?\]?|})
 
 let month_of_abbrev = function
   | "Jan" -> Some 1 | "Feb" -> Some 2 | "Mar" -> Some 3

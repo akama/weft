@@ -299,7 +299,7 @@ format = "syslog_bsd"
 
 [[format.syslog.middleware]]
 type = "regex_extract"
-pattern = '(\w+)\[(\d+)\]: (.*)'
+pattern = '\w+\s+\d+\s+\S+\s+\S+\s+(\w+)\[(\d+)\]: (.*)'
 fields = ["program", "pid", "message"]
 
 
@@ -324,7 +324,7 @@ max_lines = 50
 
 [[format.ocaml_app.middleware]]
 type = "regex_extract"
-pattern = '(\w+) \[(\w[\w.]*)\]: (.*)'
+pattern = '\S+\s+(\w+)\s+\[(\w[\w.]*)\]:\s+(.*)'
 fields = ["level", "module", "message"]
 
 
@@ -335,7 +335,7 @@ format = "common_log"
 
 [[format.nginx_access.middleware]]
 type = "regex_extract"
-pattern = '(\S+) - - \[.*\] "(\w+) (\S+) HTTP/\S+" (\d+) (\d+)'
+pattern = '(\S+)\s+-\s+-\s+\[.*?\]\s+"(\w+)\s+(\S+)\s+HTTP/\S+"\s+(\d+)\s+(\d+)'
 fields = ["client_ip", "method", "path", "status", "bytes"]
 |};
   close_out formats_oc;

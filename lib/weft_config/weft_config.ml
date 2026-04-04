@@ -129,7 +129,9 @@ let parse_formats_file path =
     | None -> []
   in
   let formats = List.map (fun (name, subtbl) ->
-    parse_format_config name (Otoml.table [name, subtbl])
+    match subtbl with
+    | Otoml.TomlTable pairs -> parse_format_config name (Otoml.table pairs)
+    | _ -> parse_format_config name (Otoml.table [])
   ) format_tbl in
   { formats }
 
