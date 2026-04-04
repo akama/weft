@@ -71,3 +71,19 @@ let read_lines ~fs ~dir seg =
     Printf.eprintf "Warning: could not read segment %s: %s\n"
       seg.local_path (Printexc.to_string e);
     []
+
+(* Stdlib-based read — works outside Eio runtime (e.g. from a Domain) *)
+let read_lines_stdlib ~dir seg =
+  let path = Filename.concat dir seg.local_path in
+  try
+    let ic = open_in path in
+    let len = in_channel_length ic in
+    let data = Bytes.create len in
+    really_input ic data 0 len;
+    close_in ic;
+    String.split_on_char '\n' (Bytes.to_string data)
+    |> List.filter (fun s -> String.length s > 0)
+  with Sys_error msg ->
+    Printf.eprintf "Warning: could not read segment %s: %s\n"
+      seg.local_path msg;
+    []

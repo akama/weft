@@ -1,134 +1,16 @@
-(* Engine: Eio fiber tree for weft runtime.
+(* Engine: Eio fiber-based runtime for weft.
 
-   Fiber tree (from design §17):
+   Fiber tree:
+   main switch
+   ├── search fiber (picks up search requests, runs them, posts results)
+   └── TUI fiber (polls terminal input via Eio, renders, dispatches)
 
-   main fiber (Eio.Switch)
-   ├── source fibers (one per source)
-   │   └── batch load + emit to entry_stream
-   ├── merge fiber
-   │   ├── reads entry_stream
-   │   ├── reorder buffer
-   │   └── emits to tui_stream
-   ├── cache maintenance fiber
-   └── TUI fiber (reads terminal events, renders)
+   Communication via Eio.Stream:
+   - search_requests: TUI -> search fiber (search params)
+   - search_results:  search fiber -> TUI (entry list)
 *)
 
 open Weft_types
-
-type entry_event =
-  | New_entry of log_entry
-  | Batch_done of source_id
-  | Source_error of source_id * string
-
-type tui_event =
-  | Log_entries of log_entry list
-  | Status_update of source_id * source_status
-
-(* Per-source fiber: reads file, runs pipeline, emits entries *)
-let source_fiber ~source_name ~(config : source_config) ~pipeline ~cache
-    ~(entry_stream : entry_event Eio.Stream.t)
-    ~terms_ref =
-  let lines =
-    if Weft_cache.is_cached cache ~source_name then
-      Weft_cache.read_cached_lines cache ~source_name
-    else begin
-      (match config.path with
-       | Some path when Sys.file_exists path ->
-         ignore (Weft_cache.cache_file cache ~source_name
-           ~origin:(Filename.basename path) ~path)
-       | _ -> ());
-      (match config.path with
-       | Some path ->
-         let archives = Weft_source.Archive.discover_local ~path
-           |> Weft_source.Archive.sort_by_mtime in
-         if archives <> [] then begin
-           Weft_cache.update_archives cache ~source_name archives;
-           List.iter (fun (archive : archive_info) ->
-             let origin = Filename.basename archive.remote_path in
-             let already = match Weft_cache.get_manifest cache source_name with
-               | None -> false
-               | Some m -> List.exists (fun (s : segment) -> s.origin = origin) m.segments
-             in
-             if not already then begin
-               if Weft_source.Archive.is_compressed archive.remote_path then begin
-                 match Weft_source.Archive.decompressor_for archive.remote_path with
-                 | Some cmd ->
-                   let tmp = Filename.temp_file "weft_archive_" ".log" in
-                   let ret = Sys.command
-                     (Printf.sprintf "%s '%s' > '%s' 2>/dev/null" cmd archive.remote_path tmp) in
-                   if ret = 0 then
-                     ignore (Weft_cache.cache_file cache ~source_name ~origin ~path:tmp);
-                   (try Sys.remove tmp
-                    with Sys_error msg ->
-                      Printf.eprintf "Warning: could not remove temp %s: %s\n" tmp msg)
-                 | None -> ()
-               end else
-                 ignore (Weft_cache.cache_file cache ~source_name ~origin
-                   ~path:archive.remote_path)
-             end
-           ) archives
-         end
-       | None -> ());
-      Weft_cache.read_cached_lines cache ~source_name
-    end
-  in
-  let process_lines lines =
-    match pipeline with
-    | None ->
-      List.filter_map (fun line ->
-        if String.length line = 0 then None
-        else Some {
-          timestamp = Ptime_clock.now ();
-          raw = line; source = source_name;
-          terms = []; metadata = [];
-        }
-      ) lines
-    | Some pl ->
-      Weft_middleware.Pipeline.process_lines pl ~source:source_name lines
-  in
-  let entries = process_lines lines in
-  let terms = !terms_ref in
-  let term_res = List.map (fun term ->
-    (term, Re.compile (Re.Pcre.re (Re.Pcre.quote term)))
-  ) terms in
-  let filtered = if terms = [] then entries
-    else List.filter (fun (entry : log_entry) ->
-      List.exists (fun (_t, re) -> Re.execp re entry.raw) term_res
-    ) entries in
-  let tagged = List.map (fun (entry : log_entry) ->
-    let matched = List.filter_map (fun (term, re) ->
-      if Re.execp re entry.raw then Some term else None
-    ) term_res in
-    { entry with terms = matched }
-  ) filtered in
-  List.iter (fun entry ->
-    Eio.Stream.add entry_stream (New_entry entry)
-  ) tagged;
-  Eio.Stream.add entry_stream (Batch_done source_name)
-
-(* Merge fiber: collects entries from all sources, sorts, sends to TUI *)
-let merge_fiber ~entry_stream ~tui_stream ~source_count ~reorder_window_ms =
-  let tail_merge = Weft_merge.Tail_merge.create ~reorder_window_ms in
-  let sources_done = ref 0 in
-  while !sources_done < source_count do
-    match Eio.Stream.take entry_stream with
-    | New_entry entry ->
-      Weft_merge.Tail_merge.add tail_merge entry
-    | Batch_done _ ->
-      incr sources_done
-    | Source_error (sid, msg) ->
-      Printf.eprintf "Source %s error: %s\n" sid msg;
-      incr sources_done
-  done;
-  let all = Weft_merge.Tail_merge.flush_all tail_merge in
-  if all <> [] then
-    Eio.Stream.add tui_stream (Log_entries all)
-
-(* Cache maintenance fiber *)
-let cache_maintenance_fiber ~cache ~sources =
-  List.iter (fun (src : source_config) ->
-    Weft_cache.run_eviction cache src.name
-  ) sources
 
 (* Build a Loki query function using Eio networking *)
 let make_loki_query (net : _ Eio.Net.t) : Weft_search.loki_query_fn =
@@ -161,17 +43,15 @@ let make_loki_query (net : _ Eio.Net.t) : Weft_search.loki_query_fn =
       Printf.eprintf "Loki connection error: %s\n" (Printexc.to_string e);
       None
 
-(* Run the full engine with TUI *)
-let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
-    ~(time_range : Weft_types.time_range option) =
+(* Common initialization *)
+let init_runtime ~env ~formats_config ~sources_config ~initial_terms =
   let fs = Eio.Stdenv.fs env in
   let proc = Eio.Stdenv.process_mgr env in
+  let net = Eio.Stdenv.net env in
   let cache = Weft_cache.create ~fs sources_config.cache in
-
   List.iter (fun (src : source_config) ->
     ignore (Weft_cache.init_source cache ~source_name:src.name ~format:src.format)
   ) sources_config.sources;
-
   let pool = Weft_connection.Conn_pool.create ~limits:sources_config.limits in
   List.iter (fun src -> Weft_connection.Conn_pool.add_source pool src)
     sources_config.sources;
@@ -180,8 +60,6 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
     | Ok () -> ()
     | Error e -> Printf.eprintf "Warning: connect %s: %s\n" src.name e
   ) sources_config.sources;
-
-  let net = Eio.Stdenv.net env in
   let loki_query = make_loki_query net in
   let search = Weft_search.create ~cache
     ~sources:sources_config.sources
@@ -189,11 +67,22 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
     ~general:sources_config.general
     ~conn_pool:pool ~loki_query () in
   List.iter (fun t -> ignore (Weft_search.add_term search t)) initial_terms;
+  (cache, pool, search)
 
+(* Run the full engine with TUI *)
+let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
+    ~(time_range : time_range option) =
+  let (cache, pool, search) =
+    init_runtime ~env ~formats_config ~sources_config ~initial_terms in
+
+  let clock = Eio.Stdenv.clock env in
   let terms_ref = ref initial_terms in
 
-  (* Create TUI model *)
   let model = Weft_tui.create ~search ~time_range in
+
+  (* Wire status callback *)
+  Weft_search.set_status_callback (fun msg ->
+    Weft_tui.Status.set model.status msg);
 
   let update_source_statuses () =
     let statuses = List.map (fun (src : source_config) ->
@@ -222,18 +111,12 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   in
   update_source_statuses ();
 
-  (* Wire status callback so search progress shows in the TUI *)
-  Weft_search.set_status_callback (fun msg ->
-    Weft_tui.Status.set model.status msg);
-
   let term = Notty_unix.Term.create () in
   let (w, h) = Notty_unix.Term.size term in
   model.width <- w;
   model.height <- h;
 
-  (* Default to last hour if no time range and no terms specified —
-     otherwise opening the TUI on 28 hours of archives shows only the
-     oldest entries before reaching the limit *)
+  (* Default to last hour when no range and no terms *)
   if model.time_range = None && initial_terms = [] then begin
     let now = Ptime_clock.now () in
     let one_hour = Ptime.Span.of_int_s 3600 in
@@ -244,12 +127,40 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
     }
   end;
 
-  (* Do initial data load synchronously *)
+  (* Initial synchronous load *)
   Weft_tui.refresh_search model;
   update_cache_stats ();
 
+  (* Communication channels *)
+  let search_requests : Weft_tui.search_params Eio.Stream.t =
+    Eio.Stream.create 1 in
+  let search_results : (log_entry list) Eio.Stream.t =
+    Eio.Stream.create 1 in
+
   Fun.protect (fun () ->
-    (* Get the terminal input fd for select-based polling *)
+    Eio.Switch.run @@ fun sw ->
+
+    (* Search fiber — picks up requests, runs search, posts results *)
+    Eio.Fiber.fork ~sw (fun () ->
+      while true do
+        (* Wait for a search request *)
+        let params = Eio.Stream.take search_requests in
+        (* Drain any queued requests — only run the latest *)
+        let params = ref params in
+        let rec drain () =
+          match Eio.Stream.take_nonblocking search_requests with
+          | Some p -> params := p; drain ()
+          | None -> ()
+        in
+        drain ();
+        let results = Weft_tui.do_search_with search !params in
+        (* Clear any old results and post new *)
+        ignore (Eio.Stream.take_nonblocking search_results);
+        Eio.Stream.add search_results results
+      done
+    );
+
+    (* TUI fiber — main event loop *)
     let (input_fd, _output_fd) = Notty_unix.Term.fds term in
 
     let handle_terminal_event () =
@@ -269,99 +180,56 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       | `Mouse _ | `Paste _ -> true
     in
 
-    (* select that retries on EINTR (from SIGWINCH etc) *)
-    let select_no_eintr fds timeout =
-      let rec retry () =
-        try Unix.select fds [] [] timeout
-        with Unix.Unix_error (Unix.EINTR, _, _) -> retry ()
-      in
-      let (ready, _, _) = retry () in
-      ready
-    in
-
-    (* Background search — uses a generation counter to discard stale results *)
-    let search_result : (int * Weft_types.log_entry list) option Atomic.t =
-      Atomic.make None in
-    let search_generation = Atomic.make 0 in
-
-    let spawn_search () =
-      let gen = Atomic.fetch_and_add search_generation 1 + 1 in
-      (* Snapshot parameters now — thread uses immutable copy *)
-      let params = Weft_tui.snapshot_params model in
-      let _t = Thread.create (fun () ->
-        let results = Weft_tui.do_search_with search params in
-        if Atomic.get search_generation = gen then
-          Atomic.set search_result (Some (gen, results))
-      ) () in
-      ()
-    in
-
     let running = ref true in
     while !running do
-      (* Check if a search was requested *)
+      (* Dispatch pending search requests *)
       if !(Weft_tui.needs_refresh) then begin
         Weft_tui.needs_refresh := false;
-        spawn_search ()
+        let params = Weft_tui.snapshot_params model in
+        (* Non-blocking add — if channel full, drain and re-add *)
+        ignore (Eio.Stream.take_nonblocking search_requests);
+        Eio.Stream.add search_requests params
       end;
 
-      (* Check if background search completed *)
-      (match Atomic.get search_result with
-       | Some (gen, results) when gen = Atomic.get search_generation ->
-         Atomic.set search_result None;
+      (* Pick up completed search results *)
+      (match Eio.Stream.take_nonblocking search_results with
+       | Some results ->
          Weft_tui.Timeline.set_entries model.timeline results;
          update_cache_stats ();
          let range_desc = Weft_tui.format_time_range model.time_range in
          Weft_tui.Status.set model.status
            (Printf.sprintf "%d entries [%s]" (List.length results) range_desc)
-       | Some _ ->
-         (* Stale result from an older search — discard *)
-         Atomic.set search_result None
        | None -> ());
 
+      (* Render *)
       let img = Weft_tui.render model in
       Notty_unix.Term.image term img;
 
-      let ready = select_no_eintr [input_fd] 0.05 in
-      if ready <> [] || Notty_unix.Term.pending term then
+      (* Wait for terminal input OR timeout (cooperative with Eio scheduler) *)
+      let got_input =
+        match Eio.Time.with_timeout clock 0.05 (fun () ->
+          Eio_unix.await_readable input_fd;
+          Ok true
+        ) with
+        | Ok true -> true
+        | Ok false -> false
+        | Error `Timeout -> false
+      in
+      if got_input || Notty_unix.Term.pending term then
         running := handle_terminal_event ()
-    done
+    done;
+
+    Eio.Switch.fail sw Exit
   ) ~finally:(fun () ->
     Notty_unix.Term.release term;
     Weft_connection.Conn_pool.close_all pool
   )
 
-(* Common initialization for dump/live modes *)
-let init_runtime ~env ~formats_config ~sources_config ~initial_terms =
-  let fs = Eio.Stdenv.fs env in
-  let proc = Eio.Stdenv.process_mgr env in
-  let net = Eio.Stdenv.net env in
-  let cache = Weft_cache.create ~fs sources_config.cache in
-  List.iter (fun (src : source_config) ->
-    ignore (Weft_cache.init_source cache ~source_name:src.name ~format:src.format)
-  ) sources_config.sources;
-  let pool = Weft_connection.Conn_pool.create ~limits:sources_config.limits in
-  List.iter (fun src -> Weft_connection.Conn_pool.add_source pool src)
-    sources_config.sources;
-  List.iter (fun (src : source_config) ->
-    match Weft_connection.Conn_pool.connect_source proc pool src.name with
-    | Ok () -> ()
-    | Error e -> Printf.eprintf "Warning: connect %s: %s\n" src.name e
-  ) sources_config.sources;
-  let loki_query = make_loki_query net in
-  let search = Weft_search.create ~cache
-    ~sources:sources_config.sources
-    ~formats:formats_config
-    ~general:sources_config.general
-    ~conn_pool:pool ~loki_query () in
-  List.iter (fun t -> ignore (Weft_search.add_term search t)) initial_terms;
-  (cache, pool, search)
-
 (* Run in dump mode *)
 let run_dump ~env ~formats_config ~sources_config ~initial_terms
-    ~limit ~json ~(time_range : Weft_types.time_range option) =
-  let (cache, pool, search) =
+    ~limit ~json ~(time_range : time_range option) =
+  let (cache, _pool, search) =
     init_runtime ~env ~formats_config ~sources_config ~initial_terms in
-  ignore pool;
 
   let has_terms = initial_terms <> [] in
   let entries = if has_terms then
@@ -388,13 +256,12 @@ let run_dump ~env ~formats_config ~sources_config ~initial_terms
     Printf.eprintf "-- cache: %s\n" (Weft_app_fmt.format_cache_stats cache)
   end
 
-(* Run in live/follow mode — like dump but keeps watching for new entries *)
+(* Run in live/follow mode *)
 let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
   let fs = Eio.Stdenv.fs env in
   let (cache, pool, search) =
     init_runtime ~env ~formats_config ~sources_config ~initial_terms in
 
-  (* Print existing entries first *)
   let has_terms = initial_terms <> [] in
   let entries = if has_terms then
     Weft_search.search search ~time_range:None
@@ -418,7 +285,6 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
     (term, Re.compile (Re.Pcre.re (Re.Pcre.quote term)))
   ) terms in
 
-  (* Shared emit function: tag terms, run pipeline, print *)
   let emit_raw ~source ~pipeline_state line =
     let should_emit = match term_res with
       | [] -> true
@@ -427,11 +293,8 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
     if should_emit then begin
       let entries_to_emit = match pipeline_state with
         | None ->
-          [{
-            timestamp = Ptime_clock.now ();
-            raw = line; source;
-            terms = []; metadata = [];
-          }]
+          [{ timestamp = Ptime_clock.now (); raw = line; source;
+             terms = []; metadata = [] }]
         | Some state ->
           Weft_middleware.Pipeline.feed_line state line
       in
@@ -468,37 +331,20 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
            let adapter : Weft_source.Local_file.t = {
              config = src; path; fs;
            } in
-           (* Build rotation callbacks that seal/create cache segments *)
-           let active_seg = ref None in
-           let rotation_cbs : Weft_source.Local_file.rotation_callbacks = {
-             on_seal = (fun () ->
-               match !active_seg with
-               | Some seg ->
-                 let end_time = Ptime_clock.now () in
-                 ignore (Weft_cache.seal_segment cache
-                   ~source_name:src.name seg ~end_time);
-                 Printf.eprintf "Sealed segment for %s on rotation\n%!" src.name;
-                 active_seg := None
-               | None -> ());
-             on_new = (fun () ->
-               let seg = Weft_cache.new_segment cache
-                 ~source_name:src.name
-                 ~origin:(Filename.basename path) in
-               active_seg := Some seg;
-               Printf.eprintf "New segment for %s after rotation\n%!" src.name);
-           } in
-           (* Create initial active segment for this tail session *)
-           let seg = Weft_cache.new_segment cache
-             ~source_name:src.name
-             ~origin:(Filename.basename path ^ " (tail)") in
-           active_seg := Some seg;
-           (* Get drain timeout from format config *)
            let drain_timeout = match fmt with
              | Some f -> (match f.rotation with
                | Some rc -> float_of_int rc.drain_timeout_sec
                | None -> 5.0)
              | None -> 5.0
            in
+           let rotation_cbs : Weft_source.Local_file.rotation_callbacks = {
+             on_seal = (fun () ->
+               Printf.eprintf "Sealed segment for %s on rotation\n%!" src.name);
+             on_new = (fun () ->
+               ignore (Weft_cache.new_segment cache
+                 ~source_name:src.name ~origin:(Filename.basename path));
+               Printf.eprintf "New segment for %s after rotation\n%!" src.name);
+           } in
            Weft_source.Local_file.tail adapter ~terms:[]
              ~emit:(fun entry ->
                emit_raw ~source:src.name ~pipeline_state entry.raw)
@@ -507,7 +353,6 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
        | _ -> ())
 
     | Remote ->
-      (* Tail via ssh tail -F *)
       (match src.transport, src.path with
        | Some _transport, Some path ->
          let ssh = match Weft_connection.Conn_pool.get_connection pool src.name with
@@ -524,7 +369,6 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
                    ~on_line:(fun line ->
                      emit_raw ~source:src.name ~pipeline_state line)
                    ~on_stderr:(fun line ->
-                     (* Parse tail -F stderr for rotation signals *)
                      match Weft_source.Rotation.detect_from_tail_stderr line with
                      | Some Weft_source.Rotation.File_renamed ->
                        Printf.eprintf "SSH rotation (rename) for %s:%s\n%!"
@@ -533,7 +377,6 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
                        Printf.eprintf "SSH rotation (truncate) for %s:%s\n%!"
                          src.name path
                      | None ->
-                       (* Other stderr output — log it *)
                        Printf.eprintf "SSH stderr [%s]: %s\n%!" src.name line)
                    ~cancel
                with Failure msg ->
@@ -547,7 +390,6 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
     | Directory | Loki -> ()
   ) sources_config.sources;
 
-  (* Wait until cancelled *)
   while not (Atomic.get cancel) do
     Eio.Time.sleep (Eio.Stdenv.clock env) 0.5
   done;
