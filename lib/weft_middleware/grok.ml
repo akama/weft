@@ -17,7 +17,7 @@ let expand_pattern pattern =
         | Some replacement ->
           changed := true;
           match field_name with
-          | Some name -> Printf.sprintf "(?P<%s>%s)" name replacement
+          | Some name -> Printf.sprintf "(?<%s>%s)" name replacement
           | None -> Printf.sprintf "(?:%s)" replacement
       ) in
       if !changed then expand result (depth + 1)
@@ -34,7 +34,7 @@ let create pattern =
   let expanded = expand_pattern pattern in
   let re = Re.compile (Re.Pcre.re expanded) in
   (* Extract field names from (?P<name>...) groups *)
-  let name_re = Re.compile (Re.Pcre.re {|\(\?P<(\w+)>|}) in
+  let name_re = Re.compile (Re.Pcre.re {|\(\?(?:P)?<(\w+)>|}) in
   let field_names =
     Re.all name_re expanded
     |> List.filter_map (fun g ->
