@@ -192,18 +192,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
 
   let terms_ref = ref initial_terms in
 
-  let entry_stream : entry_event Eio.Stream.t = Eio.Stream.create 8192 in
-  let tui_stream : tui_event Eio.Stream.t = Eio.Stream.create 256 in
-
-  let source_adapters = List.map (fun (src : source_config) ->
-    let fmt = Weft_config.resolve_format formats_config src.format in
-    let pipeline = Option.map Weft_middleware.Pipeline.create fmt in
-    (src, pipeline)
-  ) sources_config.sources in
-
-  let source_count = List.length source_adapters in
-
-  (* Create TUI model before starting fibers so we can show initial state *)
+  (* Create TUI model *)
   let model = Weft_tui.create ~search ~time_range in
 
   let update_source_statuses () =
@@ -234,51 +223,12 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   model.width <- w;
   model.height <- h;
 
+  (* Do initial data load synchronously — this populates the cache
+     and runs the search, giving immediate results *)
+  Weft_tui.refresh_search model;
+  update_cache_stats ();
+
   Fun.protect (fun () ->
-    Eio.Switch.run @@ fun sw ->
-
-    (* Spawn source fibers *)
-    List.iter (fun ((config : source_config), pipeline) ->
-      Eio.Fiber.fork ~sw (fun () ->
-        (try
-           source_fiber ~source_name:config.name ~config ~pipeline
-             ~cache ~entry_stream ~terms_ref
-         with exn ->
-           Eio.Stream.add entry_stream
-             (Source_error (config.name, Printexc.to_string exn)))
-      )
-    ) source_adapters;
-
-    (* Spawn merge fiber *)
-    Eio.Fiber.fork ~sw (fun () ->
-      merge_fiber ~entry_stream ~tui_stream ~source_count
-        ~reorder_window_ms:sources_config.general.reorder_window_ms
-    );
-
-    (* Spawn cache maintenance *)
-    Eio.Fiber.fork ~sw (fun () ->
-      cache_maintenance_fiber ~cache ~sources:sources_config.sources
-    );
-
-    (* TUI event loop — main fiber *)
-    let drain_entries () =
-      let rec drain () =
-        match Eio.Stream.take_nonblocking tui_stream with
-        | None -> ()
-        | Some (Log_entries entries) ->
-          List.iter (fun e ->
-            Weft_tui.Timeline.append_entry model.timeline e
-          ) entries;
-          update_cache_stats ();
-          drain ()
-        | Some (Status_update (sid, status)) ->
-          ignore (sid, status);
-          update_source_statuses ();
-          drain ()
-      in
-      drain ()
-    in
-
     (* Get the terminal input fd for select-based polling *)
     let (input_fd, _output_fd) = Notty_unix.Term.fds term in
 
@@ -290,7 +240,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
         let new_terms = Weft_search.enabled_terms search in
         if new_terms <> !terms_ref then begin
           terms_ref := new_terms;
-          Weft_tui.refresh_search model
+          Weft_tui.refresh_search model;
+          update_cache_stats ()
         end;
         let (w, h) = Notty_unix.Term.size term in
         model.width <- w;
@@ -305,9 +256,6 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
 
     let running = ref true in
     while !running do
-      Eio.Fiber.yield ();
-      drain_entries ();
-
       let img = Weft_tui.render model in
       Notty_unix.Term.image term img;
 
@@ -315,13 +263,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       let ready, _, _ = Unix.select [input_fd] [] [] 0.05 in
       if ready <> [] || Notty_unix.Term.pending term then
         running := handle_terminal_event ()
-      else
-        (* No input — yield to let other fibers run *)
-        Eio.Fiber.yield ()
-    done;
-
-    (* Cancel switch to stop all fibers *)
-    Eio.Switch.fail sw Exit
+    done
   ) ~finally:(fun () ->
     Notty_unix.Term.release term;
     Weft_connection.Conn_pool.close_all pool
