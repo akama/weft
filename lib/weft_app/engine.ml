@@ -205,16 +205,17 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
     let (total_size, total_segments, (earliest, latest)) =
       Weft_cache.cache_stats cache in
     let size_mb = Int64.to_int (Int64.div total_size (Int64.of_int (1024 * 1024))) in
-    let range = match earliest, latest with
-      | Some s, Some e ->
-        let (sd, _) = Ptime.to_date_time s in
-        let (ed, _) = Ptime.to_date_time e in
-        let fmt (y, m, d) = Printf.sprintf "%04d-%02d-%02d" y m d in
-        if sd = ed then fmt sd else Printf.sprintf "%s to %s" (fmt sd) (fmt ed)
-      | _ -> ""
+    let fmt_dt t =
+      let ((_y, mo, d), ((hh, mm, _ss), _)) = Ptime.to_date_time t in
+      Printf.sprintf "%02d-%02d %02d:%02d" mo d hh mm
+    in
+    let (cache_from, cache_to) = match earliest, latest with
+      | Some s, Some e -> (fmt_dt s, fmt_dt e)
+      | Some s, None -> (fmt_dt s, "now")
+      | _ -> ("", "")
     in
     Weft_tui.Sidebar.update_cache_info model.sidebar
-      ~size_mb ~segments:total_segments ~time_range:range
+      ~size_mb ~segments:total_segments ~cache_from ~cache_to
   in
   update_source_statuses ();
 
