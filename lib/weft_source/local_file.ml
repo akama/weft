@@ -107,10 +107,19 @@ let read_new_lines ic =
    with End_of_file -> ());
   List.rev !lines
 
-(* Tail using inotify for efficient file watching *)
+(* Default wait: Unix.select (blocks OS thread — use only outside Eio) *)
+let default_wait_readable fd timeout =
+  let ready, _, _ = Unix.select [fd] [] [] timeout in
+  ready <> []
+
+(* Tail using inotify for efficient file watching.
+   wait_readable: function to poll fd readability. Pass an Eio-aware
+   version when running inside Eio to avoid blocking the scheduler. *)
 let tail t ~terms ~emit ~cancel
     ?(on_rotation : rotation_callbacks option)
-    ?(drain_timeout = 5.0) () =
+    ?(drain_timeout = 5.0)
+    ?(wait_readable = default_wait_readable)
+    () =
   let pattern = if terms = [] then None
     else Some (Re.compile (Re.Pcre.re (String.concat "|"
       (List.map Re.Pcre.quote terms)))) in
@@ -165,9 +174,7 @@ let tail t ~terms ~emit ~cancel
     in
 
     while not (Atomic.get cancel) do
-      (* Use Unix.select to wait for inotify events with timeout *)
-      let ready, _, _ = Unix.select [inotify_fd] [] [] 0.5 in
-      if ready <> [] then begin
+      if wait_readable inotify_fd 0.5 then begin
         let events = Inotify.read inotify_fd in
         List.iter (fun (_wd, kinds, _cookie, _name) ->
           if List.mem Inotify.Modify kinds then begin
