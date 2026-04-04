@@ -247,8 +247,7 @@ let handle_key model key =
     | `ASCII 'j' | `Arrow `Down ->
       (match model.focus with
        | Timeline -> Timeline.scroll_down model.timeline
-       | Sources ->
-         Sidebar.move_source_selection model.sidebar 1
+       | Sources -> Sidebar.move_source_selection model.sidebar 1
        | Terms ->
          let terms = Weft_search.all_terms model.search in
          Sidebar.move_term_selection model.sidebar ~terms 1)
@@ -260,6 +259,14 @@ let handle_key model key =
        | Terms ->
          let terms = Weft_search.all_terms model.search in
          Sidebar.move_term_selection model.sidebar ~terms (-1))
+    | `Page `Up ->
+      if model.focus = Timeline then Timeline.page_up model.timeline
+    | `Page `Down ->
+      if model.focus = Timeline then Timeline.page_down model.timeline
+    | `Home | `ASCII 'g' ->
+      if model.focus = Timeline then Timeline.goto_top model.timeline
+    | `End | `ASCII 'G' ->
+      if model.focus = Timeline then Timeline.goto_bottom model.timeline
     | `Enter ->
       Detail.toggle model.detail
     | `Tab | `ASCII '\t' ->
