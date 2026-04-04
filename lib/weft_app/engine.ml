@@ -4,19 +4,13 @@
 
    main fiber (Eio.Switch)
    ├── source fibers (one per source)
-   │   ├── tail sub-fiber (reads new entries, emits to source_stream)
-   │   └── cache writer sub-fiber (appends to active segment)
+   │   └── batch load + emit to entry_stream
    ├── merge fiber
-   │   ├── reads all source_streams
+   │   ├── reads entry_stream
    │   ├── reorder buffer
    │   └── emits to tui_stream
-   ├── cache maintenance fiber (periodic TTL eviction)
+   ├── cache maintenance fiber
    └── TUI fiber (reads terminal events, renders)
-
-   Communication:
-   - source -> merge: Eio.Stream per source
-   - merge -> TUI: Eio.Stream of log_entry
-   - TUI -> sources: term updates via shared mutable state + signal
 *)
 
 open Weft_types
@@ -27,16 +21,13 @@ type entry_event =
   | Source_error of source_id * string
 
 type tui_event =
-  | Terminal_event of [ Notty.Unescape.event | `Resize of (int * int) | `End ]
   | Log_entries of log_entry list
   | Status_update of source_id * source_status
-  | Progress of string * float  (* label, 0.0-1.0 *)
 
 (* Per-source fiber: reads file, runs pipeline, emits entries *)
-let source_fiber ~sw:_ ~source_name ~config ~pipeline ~cache
+let source_fiber ~source_name ~(config : source_config) ~pipeline ~cache
     ~(entry_stream : entry_event Eio.Stream.t)
     ~terms_ref =
-  (* Initial batch load *)
   let lines =
     if Weft_cache.is_cached cache ~source_name then
       Weft_cache.read_cached_lines cache ~source_name
@@ -46,7 +37,6 @@ let source_fiber ~sw:_ ~source_name ~config ~pipeline ~cache
          ignore (Weft_cache.cache_file cache ~source_name
            ~origin:(Filename.basename path) ~path)
        | _ -> ());
-      (* Discover archives *)
       (match config.path with
        | Some path ->
          let archives = Weft_source.Archive.discover_local ~path
@@ -82,7 +72,6 @@ let source_fiber ~sw:_ ~source_name ~config ~pipeline ~cache
       Weft_cache.read_cached_lines cache ~source_name
     end
   in
-  (* Process through pipeline *)
   let process_lines lines =
     match pipeline with
     | None ->
@@ -98,7 +87,6 @@ let source_fiber ~sw:_ ~source_name ~config ~pipeline ~cache
       Weft_middleware.Pipeline.process_lines pl ~source:source_name lines
   in
   let entries = process_lines lines in
-  (* Filter by current terms and emit *)
   let terms = !terms_ref in
   let term_res = List.map (fun term ->
     (term, Re.compile (Re.Pcre.re (Re.Pcre.quote term)))
@@ -122,7 +110,6 @@ let source_fiber ~sw:_ ~source_name ~config ~pipeline ~cache
 let merge_fiber ~entry_stream ~tui_stream ~source_count ~reorder_window_ms =
   let tail_merge = Weft_merge.Tail_merge.create ~reorder_window_ms in
   let sources_done = ref 0 in
-  (* Collect all batch entries *)
   while !sources_done < source_count do
     match Eio.Stream.take entry_stream with
     | New_entry entry ->
@@ -133,15 +120,12 @@ let merge_fiber ~entry_stream ~tui_stream ~source_count ~reorder_window_ms =
       Printf.eprintf "Source %s error: %s\n" sid msg;
       incr sources_done
   done;
-  (* Flush all entries to TUI *)
   let all = Weft_merge.Tail_merge.flush_all tail_merge in
   if all <> [] then
     Eio.Stream.add tui_stream (Log_entries all)
 
-(* Cache maintenance fiber: periodic eviction *)
-let cache_maintenance_fiber ~sw:_ ~cache ~sources ~interval_s =
-  ignore interval_s;
-  (* Run eviction once at startup *)
+(* Cache maintenance fiber *)
+let cache_maintenance_fiber ~cache ~sources =
   List.iter (fun (src : source_config) ->
     Weft_cache.run_eviction cache src.name
   ) sources
@@ -150,9 +134,9 @@ let cache_maintenance_fiber ~sw:_ ~cache ~sources ~interval_s =
 let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
   let fs = Eio.Stdenv.fs env in
   let proc = Eio.Stdenv.process_mgr env in
+  let clock = Eio.Stdenv.clock env in
   let cache = Weft_cache.create ~fs sources_config.cache in
 
-  (* Init cache and connections *)
   List.iter (fun (src : source_config) ->
     ignore (Weft_cache.init_source cache ~source_name:src.name ~format:src.format)
   ) sources_config.sources;
@@ -166,21 +150,17 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
     | Error e -> Printf.eprintf "Warning: connect %s: %s\n" src.name e
   ) sources_config.sources;
 
-  (* Build search engine for TUI *)
   let search = Weft_search.create ~cache
     ~sources:sources_config.sources
     ~formats:formats_config
     ~general:sources_config.general in
   List.iter (fun t -> ignore (Weft_search.add_term search t)) initial_terms;
 
-  (* Shared terms state *)
   let terms_ref = ref initial_terms in
 
-  (* Streams *)
-  let entry_stream = Eio.Stream.create 4096 in
-  let tui_stream = Eio.Stream.create 256 in
+  let entry_stream : entry_event Eio.Stream.t = Eio.Stream.create 8192 in
+  let tui_stream : tui_event Eio.Stream.t = Eio.Stream.create 256 in
 
-  (* Build source adapters info *)
   let source_adapters = List.map (fun (src : source_config) ->
     let fmt = Weft_config.resolve_format formats_config src.format in
     let pipeline = Option.map Weft_middleware.Pipeline.create fmt in
@@ -189,39 +169,14 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
 
   let source_count = List.length source_adapters in
 
-  Eio.Switch.run @@ fun sw ->
-
-  (* Spawn source fibers *)
-  List.iter (fun ((config : source_config), pipeline) ->
-    Eio.Fiber.fork ~sw (fun () ->
-      (try
-         source_fiber ~sw ~source_name:config.name ~config ~pipeline
-           ~cache ~entry_stream ~terms_ref
-       with exn ->
-         Eio.Stream.add entry_stream
-           (Source_error (config.name, Printexc.to_string exn)))
-    )
-  ) source_adapters;
-
-  (* Spawn merge fiber *)
-  Eio.Fiber.fork ~sw (fun () ->
-    merge_fiber ~entry_stream ~tui_stream ~source_count
-      ~reorder_window_ms:sources_config.general.reorder_window_ms
-  );
-
-  (* Spawn cache maintenance *)
-  Eio.Fiber.fork ~sw (fun () ->
-    cache_maintenance_fiber ~sw ~cache
-      ~sources:sources_config.sources ~interval_s:300
-  );
-
-  (* Create TUI *)
+  (* Create TUI model before starting fibers so we can show initial state *)
   let model = Weft_tui.create ~search in
+
   let update_source_statuses () =
-    let source_statuses = List.map (fun (src : source_config) ->
+    let statuses = List.map (fun (src : source_config) ->
       (src.name, Weft_connection.Conn_pool.get_status pool src.name)
     ) sources_config.sources in
-    Weft_tui.Sidebar.update_sources model.sidebar source_statuses
+    Weft_tui.Sidebar.update_sources model.sidebar statuses
   in
   let update_cache_stats () =
     let (total_size, total_segments, (earliest, latest)) =
@@ -239,57 +194,75 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
       ~size_mb ~segments:total_segments ~time_range:range
   in
   update_source_statuses ();
-  update_cache_stats ();
 
-  (* TUI event loop — runs in main fiber *)
   let term = Notty_unix.Term.create () in
   let (w, h) = Notty_unix.Term.size term in
   model.width <- w;
   model.height <- h;
 
-  (* Drain entries from tui_stream before first render *)
-  let drain_entries () =
-    let rec drain () =
-      match Eio.Stream.take_nonblocking tui_stream with
-      | None -> ()
-      | Some (Log_entries entries) ->
-        List.iter (fun e -> Weft_tui.Timeline.append_entry model.timeline e) entries;
-        update_cache_stats ();
-        drain ()
-      | Some (Status_update (sid, status)) ->
-        let statuses = List.map (fun (src : source_config) ->
-          (src.name, if src.name = sid then status
-                     else Weft_connection.Conn_pool.get_status pool src.name)
-        ) sources_config.sources in
-        Weft_tui.Sidebar.update_sources model.sidebar statuses;
-        drain ()
-      | Some (Progress (_label, _pct)) ->
-        drain ()
-      | Some (Terminal_event _) ->
-        drain ()
-    in
-    drain ()
-  in
-
-  (* Interleave terminal events with entry updates *)
-  let running = ref true in
   Fun.protect (fun () ->
+    Eio.Switch.run @@ fun sw ->
+
+    (* Spawn source fibers *)
+    List.iter (fun ((config : source_config), pipeline) ->
+      Eio.Fiber.fork ~sw (fun () ->
+        (try
+           source_fiber ~source_name:config.name ~config ~pipeline
+             ~cache ~entry_stream ~terms_ref
+         with exn ->
+           Eio.Stream.add entry_stream
+             (Source_error (config.name, Printexc.to_string exn)))
+      )
+    ) source_adapters;
+
+    (* Spawn merge fiber *)
+    Eio.Fiber.fork ~sw (fun () ->
+      merge_fiber ~entry_stream ~tui_stream ~source_count
+        ~reorder_window_ms:sources_config.general.reorder_window_ms
+    );
+
+    (* Spawn cache maintenance *)
+    Eio.Fiber.fork ~sw (fun () ->
+      cache_maintenance_fiber ~cache ~sources:sources_config.sources
+    );
+
+    (* TUI event loop — main fiber *)
+    let drain_entries () =
+      let rec drain () =
+        match Eio.Stream.take_nonblocking tui_stream with
+        | None -> ()
+        | Some (Log_entries entries) ->
+          List.iter (fun e ->
+            Weft_tui.Timeline.append_entry model.timeline e
+          ) entries;
+          update_cache_stats ();
+          drain ()
+        | Some (Status_update (sid, status)) ->
+          ignore (sid, status);
+          update_source_statuses ();
+          drain ()
+      in
+      drain ()
+    in
+
+    let running = ref true in
     while !running do
+      (* Yield to Eio scheduler so source/merge fibers can run *)
+      Eio.Fiber.yield ();
+
       drain_entries ();
       let img = Weft_tui.render model in
       Notty_unix.Term.image term img;
-      (* Poll for terminal event with short timeout *)
+
       if Notty_unix.Term.pending term then begin
         match Notty_unix.Term.event term with
         | `End | `Key (`ASCII 'C', [`Ctrl]) ->
           running := false
         | `Key (key, _mods) ->
           Weft_tui.handle_key model key;
-          (* Check if search term was added *)
           let new_terms = Weft_search.enabled_terms search in
           if new_terms <> !terms_ref then begin
             terms_ref := new_terms;
-            (* §14: catch-up from cache with updated terms (local I/O only) *)
             Weft_tui.refresh_search model
           end;
           if model.quit then running := false;
@@ -301,15 +274,18 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
           model.height <- h
         | `Mouse _ | `Paste _ -> ()
       end else
-        (* No terminal input — sleep briefly to avoid busy-wait *)
-        Unix.sleepf 0.016  (* ~60fps *)
-    done
+        (* Sleep via Eio so other fibers can run *)
+        Eio.Time.sleep clock 0.016
+    done;
+
+    (* Cancel switch to stop all fibers *)
+    Eio.Switch.fail sw Exit
   ) ~finally:(fun () ->
     Notty_unix.Term.release term;
     Weft_connection.Conn_pool.close_all pool
   )
 
-(* Run in dump mode — same fiber tree but output to stdout *)
+(* Run in dump mode *)
 let run_dump ~env ~formats_config ~sources_config ~initial_terms
     ~limit ~json =
   let fs = Eio.Stdenv.fs env in
@@ -348,3 +324,108 @@ let run_dump ~env ~formats_config ~sources_config ~initial_terms
     Printf.eprintf "-- %d entries\n" !count;
     Printf.eprintf "-- cache: %s\n" (Weft_app_fmt.format_cache_stats cache)
   end
+
+(* Run in live/follow mode — like dump but keeps watching for new entries *)
+let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
+  let fs = Eio.Stdenv.fs env in
+  let cache = Weft_cache.create ~fs sources_config.cache in
+  List.iter (fun (src : source_config) ->
+    ignore (Weft_cache.init_source cache ~source_name:src.name ~format:src.format)
+  ) sources_config.sources;
+
+  let search = Weft_search.create ~cache
+    ~sources:sources_config.sources
+    ~formats:formats_config
+    ~general:sources_config.general in
+  List.iter (fun t -> ignore (Weft_search.add_term search t)) initial_terms;
+
+  (* Print existing entries first *)
+  let has_terms = initial_terms <> [] in
+  let entries = if has_terms then
+    Weft_search.search search ~time_range:None
+  else
+    Weft_search.load_all search
+  in
+  let count = ref 0 in
+  Seq.iter (fun (entry : log_entry) ->
+    incr count;
+    if json then print_endline (Weft_app_fmt.entry_to_json entry)
+    else print_endline (Weft_app_fmt.format_entry entry)
+  ) entries;
+  Printf.eprintf "-- %d historical entries, now tailing...\n%!" !count;
+
+  (* Build adapters for tailing *)
+  let adapters = List.filter_map (fun (src : source_config) ->
+    match src.source_type, src.path with
+    | File, Some path when Sys.file_exists path ->
+      let fmt = Weft_config.resolve_format formats_config src.format in
+      let pipeline = Option.map Weft_middleware.Pipeline.create fmt in
+      Some (src, path, pipeline)
+    | _ -> None
+  ) sources_config.sources in
+
+  let cancel = Atomic.make false in
+  Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ ->
+    Atomic.set cancel true));
+
+  let terms = if has_terms then initial_terms else [] in
+
+  (* Tail each source — emit entries as they arrive *)
+  let emit (entry : log_entry) =
+    incr count;
+    let entry = match terms with
+      | [] -> entry
+      | _ ->
+        let matched = List.filter (fun term ->
+          let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
+          Re.execp re entry.raw
+        ) terms in
+        { entry with terms = matched }
+    in
+    (* Run through pipeline if we have one *)
+    if json then print_endline (Weft_app_fmt.entry_to_json entry)
+    else print_endline (Weft_app_fmt.format_entry entry)
+  in
+
+  Eio.Switch.run @@ fun sw ->
+  List.iter (fun ((src : source_config), path, pipeline) ->
+    Eio.Fiber.fork ~sw (fun () ->
+      let adapter : Weft_source.Local_file.t = {
+        config = src;
+        path;
+        fs;
+      } in
+      let pipeline_state = Option.map (fun pl ->
+        Weft_middleware.Pipeline.create_stream_state pl ~source:src.name
+      ) pipeline in
+      let process_and_emit line =
+        match pipeline_state with
+        | None -> emit {
+            timestamp = Ptime_clock.now ();
+            raw = line; source = src.name;
+            terms = []; metadata = [];
+          }
+        | Some state ->
+          let entries = Weft_middleware.Pipeline.feed_line state line in
+          List.iter emit entries
+      in
+      let emit_line line =
+        let should_emit = match terms with
+          | [] -> true
+          | _ -> List.exists (fun term ->
+              let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
+              Re.execp re line
+            ) terms
+        in
+        if should_emit then process_and_emit line
+      in
+      Weft_source.Local_file.tail_simple adapter ~terms:[]
+        ~emit:(fun entry -> emit_line entry.raw) ~cancel
+    )
+  ) adapters;
+
+  (* Wait until cancelled *)
+  while not (Atomic.get cancel) do
+    Eio.Time.sleep (Eio.Stdenv.clock env) 0.5
+  done;
+  Eio.Switch.fail sw Exit

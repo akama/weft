@@ -11,11 +11,13 @@ let find_config_file name =
   ] in
   List.find_opt Sys.file_exists candidates
 
+type mode = Tui | Dump | Live
+
 type cli_args = {
   formats_path : string option;
   sources_path : string option;
   initial_terms : string list;
-  dump_mode : bool;
+  mode : mode;
   dump_limit : int;
   dump_json : bool;
 }
@@ -25,7 +27,7 @@ let parse_cli () =
     formats_path = None;
     sources_path = None;
     initial_terms = [];
-    dump_mode = false;
+    mode = Tui;
     dump_limit = 0;
     dump_json = false;
   } in
@@ -39,31 +41,32 @@ let parse_cli () =
     | "--search" :: term :: rest | "-s" :: term :: rest ->
       args := { !args with initial_terms = term :: !args.initial_terms }; parse rest
     | "--dump" :: rest ->
-      args := { !args with dump_mode = true }; parse rest
+      args := { !args with mode = Dump }; parse rest
+    | "--live" :: rest | "--follow" :: rest | "-f" :: rest ->
+      args := { !args with mode = Live }; parse rest
     | "--limit" :: n :: rest ->
       args := { !args with dump_limit = int_of_string n }; parse rest
     | "--json" :: rest ->
-      args := { !args with dump_json = true; dump_mode = true }; parse rest
+      args := { !args with dump_json = true; mode = Dump }; parse rest
     | "--help" :: _ | "-h" :: _ ->
       Printf.printf "weft — unified log search TUI\n\n";
       Printf.printf "Usage: weft [OPTIONS]\n\n";
+      Printf.printf "Modes:\n";
+      Printf.printf "  (default)            Interactive TUI\n";
+      Printf.printf "  --dump               One-shot: print matching entries and exit\n";
+      Printf.printf "  --live, -f           Print entries then tail for new ones (Ctrl-C to stop)\n";
+      Printf.printf "  --json               Dump as JSON lines (implies --dump)\n\n";
       Printf.printf "Options:\n";
       Printf.printf "  --formats <path>     Path to formats.toml\n";
       Printf.printf "  --sources <path>     Path to sources.toml\n";
       Printf.printf "  -s, --search <term>  Search term (can repeat)\n";
-      Printf.printf "  --dump               One-shot: print results to stdout and exit\n";
-      Printf.printf "  --json               Dump as JSON lines (implies --dump)\n";
-      Printf.printf "  --limit <n>          Max entries to output (0 = unlimited)\n";
+      Printf.printf "  --limit <n>          Max entries for --dump (0 = unlimited)\n";
       Printf.printf "  -h, --help           Show this help\n\n";
       Printf.printf "TUI Keys:\n";
-      Printf.printf "  /     Add search term\n";
-      Printf.printf "  j/k   Scroll timeline\n";
-      Printf.printf "  Enter Toggle detail pane\n";
-      Printf.printf "  Tab   Cycle focus\n";
-      Printf.printf "  d     Delete selected term\n";
-      Printf.printf "  s     Toggle source\n";
-      Printf.printf "  t     Toggle term visibility\n";
-      Printf.printf "  q     Quit\n";
+      Printf.printf "  /     Add search term    j/k   Scroll\n";
+      Printf.printf "  Enter Toggle detail      Tab   Cycle focus\n";
+      Printf.printf "  s     Toggle source      t     Toggle term\n";
+      Printf.printf "  d     Delete term        q     Quit\n";
       exit 0
     | unknown :: _ ->
       Printf.eprintf "Unknown argument: %s (try --help)\n" unknown;
@@ -98,10 +101,14 @@ let load_config cli =
 let run env =
   let cli = parse_cli () in
   let (formats_config, sources_config) = load_config cli in
-  if cli.dump_mode then
+  match cli.mode with
+  | Dump ->
     Engine.run_dump ~env ~formats_config ~sources_config
       ~initial_terms:cli.initial_terms
       ~limit:cli.dump_limit ~json:cli.dump_json
-  else
+  | Live ->
+    Engine.run_live ~env ~formats_config ~sources_config
+      ~initial_terms:cli.initial_terms ~json:cli.dump_json
+  | Tui ->
     Engine.run_with_tui ~env ~formats_config ~sources_config
       ~initial_terms:cli.initial_terms
