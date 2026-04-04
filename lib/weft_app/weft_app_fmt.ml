@@ -1,10 +1,10 @@
 open Weft_types
 
 let format_entry (entry : log_entry) =
-  let (_, ((hh, mm, ss), _)) = Ptime.to_date_time entry.timestamp in
+  let ((y, mo, d), ((hh, mm, ss), _)) = Ptime.to_date_time entry.timestamp in
   let _, ps = Ptime.to_span entry.timestamp |> Ptime.Span.to_d_ps in
   let ms = Int64.to_int (Int64.rem (Int64.div ps 1_000_000_000L) 1000L) in
-  let ts = Printf.sprintf "%02d:%02d:%02d.%03d" hh mm ss ms in
+  let ts = Printf.sprintf "%04d-%02d-%02d %02d:%02d:%02d.%03d" y mo d hh mm ss ms in
   let src = if String.length entry.source > 12 then
     String.sub entry.source 0 12
   else entry.source in

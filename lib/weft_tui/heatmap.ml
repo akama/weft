@@ -23,9 +23,12 @@ let density_attr count max_count =
     else if ratio < 0.85 then A.(fg yellow)
     else A.(fg lightred)
 
-let format_hm_time t =
-  let (_, ((hh, mm, _), _)) = Ptime.to_date_time t in
-  Printf.sprintf "%02d:%02d" hh mm
+let format_hm_time ?(with_date=false) t =
+  let ((_, mo, d), ((hh, mm, _), _)) = Ptime.to_date_time t in
+  if with_date then
+    Printf.sprintf "%02d-%02d %02d:%02d" mo d hh mm
+  else
+    Printf.sprintf "%02d:%02d" hh mm
 
 let make_bar buckets max_count n =
   List.init n (fun i ->
@@ -75,9 +78,15 @@ let render ~entries ~sources ~width ~height =
     let n_active = List.init n_sources (fun si ->
       Array.fold_left (+) 0 per_src.(si)) |> List.filter (fun c -> c > 0)
       |> List.length in
+    let multi_day =
+      let (d1, _) = Ptime.to_date_time !min_t in
+      let (d2, _) = Ptime.to_date_time !max_t in
+      d1 <> d2
+    in
     let title = I.string A.(st bold)
       (Printf.sprintf "  Log Density: %s -> %s  (%d entries across %d sources)"
-         (format_hm_time !min_t) (format_hm_time !max_t) n n_active) in
+         (format_hm_time ~with_date:multi_day !min_t)
+         (format_hm_time ~with_date:multi_day !max_t) n n_active) in
 
     let total_label = I.string A.(fg lightcyan) (Printf.sprintf " %-*s" lw "TOTAL") in
     let total_bar = I.hcat (total_label :: make_bar total gmax cw) in
@@ -111,7 +120,7 @@ let render ~entries ~sources ~width ~height =
       let span = Option.value ~default:Ptime.Span.zero
         (Ptime.Span.of_float_s off) in
       let t = Option.value ~default:!min_t (Ptime.add_span !min_t span) in
-      let label = format_hm_time t in
+      let label = format_hm_time ~with_date:multi_day t in
       let label_len = min (String.length label) (cw - col) in
       Bytes.blit_string label 0 axis_str col label_len
     done;

@@ -99,13 +99,18 @@ let format_time_range = function
   | None -> "all time"
   | Some tr ->
     let fmt t =
-      let (_, ((hh, mm, ss), _)) = Ptime.to_date_time t in
-      Printf.sprintf "%02d:%02d:%02d" hh mm ss
+      let ((y, mo, d), ((hh, mm, ss), _)) = Ptime.to_date_time t in
+      let now = Ptime_clock.now () in
+      let ((ty, tmo, td), _) = Ptime.to_date_time now in
+      if (y, mo, d) = (ty, tmo, td) then
+        Printf.sprintf "%02d:%02d:%02d" hh mm ss
+      else
+        Printf.sprintf "%02d-%02d %02d:%02d:%02d" mo d hh mm ss
     in
     let start_s = fmt tr.start_ in
     match tr.end_ with
-    | None -> Printf.sprintf "%s → now" start_s
-    | Some e -> Printf.sprintf "%s → %s" start_s (fmt e)
+    | None -> Printf.sprintf "%s -> now" start_s
+    | Some e -> Printf.sprintf "%s -> %s" start_s (fmt e)
 
 (* Handle keyboard input *)
 let handle_key model key =
