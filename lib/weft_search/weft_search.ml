@@ -9,16 +9,21 @@ type source_adapter = {
   ssh : Weft_connection.Ssh_control.t option;
 }
 
+type loki_query_fn =
+  url:string -> headers:(string * string) list -> string option
+
 type t = {
   term_manager : Term_manager.t;
   cache : Weft_cache.t;
   sources : source_adapter list;
   merge_config : general_config;
   mutable tail_cancel : bool Atomic.t option;
+  loki_query : loki_query_fn option;
 }
 
 let create ~cache ~sources ~formats ~general
-    ?(conn_pool : Weft_connection.Conn_pool.t option) () =
+    ?(conn_pool : Weft_connection.Conn_pool.t option)
+    ?(loki_query : loki_query_fn option) () =
   let sources = List.map (fun (src : source_config) ->
     let fmt = Weft_config.resolve_format formats src.format in
     let pipeline = Option.map Weft_middleware.Pipeline.create fmt in
@@ -42,6 +47,7 @@ let create ~cache ~sources ~formats ~general
     sources;
     merge_config = general;
     tail_cancel = None;
+    loki_query;
   }
 
 (* Tag entries with which search terms they match *)
@@ -184,7 +190,7 @@ let discover_and_cache_remote_archives adapter cache ssh =
     end
 
 (* Read lines for a source — check cache first, fetch if needed *)
-let read_source_lines adapter cache =
+let read_source_lines ?t_opt adapter cache =
   if Weft_cache.is_cached cache ~source_name:adapter.name then
     Weft_cache.read_cached_lines cache ~source_name:adapter.name
   else begin
@@ -215,14 +221,56 @@ let read_source_lines adapter cache =
           Printf.eprintf "Warning: remote source %s has no SSH connection\n"
             adapter.name)
 
-     | Directory | Loki -> ()
+     | Loki ->
+       (* Query Loki API, cache results *)
+       (match t_opt with
+        | Some t ->
+          (match t.loki_query, adapter.config.url with
+           | Some query_fn, Some base_url ->
+             let default_labels = Option.value ~default:"{}" adapter.config.default_labels in
+             let logql = default_labels in
+             let now_ns = Printf.sprintf "%Ld"
+               (Int64.mul (Int64.of_float (Unix.gettimeofday ())) 1_000_000_000L) in
+             let hour_ago_ns = Printf.sprintf "%Ld"
+               (Int64.mul (Int64.of_float (Unix.gettimeofday () -. 3600.0)) 1_000_000_000L) in
+             let url = Printf.sprintf
+               "%s/loki/api/v1/query_range?query=%s&start=%s&end=%s&limit=5000&direction=forward"
+               base_url (Uri.pct_encode logql) hour_ago_ns now_ns in
+             let headers = match adapter.config.auth with
+               | Bearer { token_env } ->
+                 (match Sys.getenv_opt token_env with
+                  | Some tok -> [("Authorization", "Bearer " ^ tok)]
+                  | None -> [])
+               | _ -> []
+             in
+             Printf.eprintf "Querying Loki at %s...\n%!" base_url;
+             (match query_fn ~url ~headers with
+              | Some body ->
+                let entries = Weft_source.Loki.parse_query_response
+                  ~source:adapter.name body in
+                (* Cache the raw lines *)
+                let data = String.concat "\n"
+                  (List.map (fun (e : log_entry) -> e.raw) entries) in
+                if data <> "" then
+                  cache_string_data cache ~source_name:adapter.name
+                    ~origin:"loki-query" data
+              | None ->
+                Printf.eprintf "Warning: Loki query returned no data\n")
+           | _ ->
+             Printf.eprintf "Warning: Loki source %s has no query function or URL\n"
+               adapter.name)
+        | None ->
+          Printf.eprintf "Warning: Loki source %s cannot query without runtime\n"
+            adapter.name)
+
+     | Directory -> ()
     );
     Weft_cache.read_cached_lines cache ~source_name:adapter.name
   end
 
 (* Batch search for a single source *)
-let search_source t adapter ~terms ~time_range =
-  let lines = read_source_lines adapter t.cache in
+let search_source ctx adapter ~terms ~time_range =
+  let lines = read_source_lines ~t_opt:ctx adapter ctx.cache in
   if lines = [] then Seq.empty
   else begin
     let entries = process_through_pipeline adapter.pipeline ~source:adapter.name lines in
@@ -246,21 +294,21 @@ let search_source t adapter ~terms ~time_range =
     List.to_seq in_range
   end
 
-let search t ~time_range =
-  let terms = Term_manager.enabled_terms t.term_manager in
+let search ctx ~time_range =
+  let terms = Term_manager.enabled_terms ctx.term_manager in
   if terms = [] then Seq.empty
   else
     let streams = List.map (fun adapter ->
-      (adapter.name, search_source t adapter ~terms ~time_range)
-    ) t.sources in
+      (adapter.name, search_source ctx adapter ~terms ~time_range)
+    ) ctx.sources in
     Weft_merge.Batch_merge.merge_with_dedup streams
 
-let load_all t =
+let load_all ctx =
   let streams = List.map (fun adapter ->
-    let lines = read_source_lines adapter t.cache in
+    let lines = read_source_lines ~t_opt:ctx adapter ctx.cache in
     let entries = process_through_pipeline adapter.pipeline ~source:adapter.name lines in
     (adapter.name, List.to_seq entries)
-  ) t.sources in
+  ) ctx.sources in
   Weft_merge.Batch_merge.merge streams
 
 let add_term t term_str =

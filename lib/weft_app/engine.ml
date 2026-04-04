@@ -130,6 +130,37 @@ let cache_maintenance_fiber ~cache ~sources =
     Weft_cache.run_eviction cache src.name
   ) sources
 
+(* Build a Loki query function using Eio networking *)
+let make_loki_query (net : _ Eio.Net.t) : Weft_search.loki_query_fn =
+  fun ~url ~headers ->
+    try
+      Eio.Switch.run @@ fun sw ->
+      let client = Cohttp_eio.Client.make ~https:None net in
+      let uri = Uri.of_string url in
+      let h = List.fold_left (fun h (k, v) -> Http.Header.add h k v)
+        (Http.Header.init_with "Accept" "application/json") headers in
+      let (resp, body) = Cohttp_eio.Client.get client ~sw ~headers:h uri in
+      let status = Http.Response.status resp in
+      let buf = Buffer.create 4096 in
+      let br = Eio.Buf_read.of_flow ~max_size:(10 * 1024 * 1024) body in
+      (try while true do
+         let chunk = Eio.Buf_read.line br in
+         Buffer.add_string buf chunk;
+         Buffer.add_char buf '\n'
+       done with End_of_file -> ());
+      let body_str = Buffer.contents buf in
+      if Http.Status.to_int status >= 400 then begin
+        Printf.eprintf "Loki HTTP %d: %s\n"
+          (Http.Status.to_int status)
+          (String.sub body_str 0 (min 200 (String.length body_str)));
+        None
+      end else
+        Some body_str
+    with
+    | Eio.Io _ as e ->
+      Printf.eprintf "Loki connection error: %s\n" (Printexc.to_string e);
+      None
+
 (* Run the full engine with TUI *)
 let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
   let fs = Eio.Stdenv.fs env in
@@ -149,11 +180,13 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
     | Error e -> Printf.eprintf "Warning: connect %s: %s\n" src.name e
   ) sources_config.sources;
 
+  let net = Eio.Stdenv.net env in
+  let loki_query = make_loki_query net in
   let search = Weft_search.create ~cache
     ~sources:sources_config.sources
     ~formats:formats_config
     ~general:sources_config.general
-    ~conn_pool:pool () in
+    ~conn_pool:pool ~loki_query () in
   List.iter (fun t -> ignore (Weft_search.add_term search t)) initial_terms;
 
   let terms_ref = ref initial_terms in
@@ -297,6 +330,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
 let init_runtime ~env ~formats_config ~sources_config ~initial_terms =
   let fs = Eio.Stdenv.fs env in
   let proc = Eio.Stdenv.process_mgr env in
+  let net = Eio.Stdenv.net env in
   let cache = Weft_cache.create ~fs sources_config.cache in
   List.iter (fun (src : source_config) ->
     ignore (Weft_cache.init_source cache ~source_name:src.name ~format:src.format)
@@ -309,11 +343,12 @@ let init_runtime ~env ~formats_config ~sources_config ~initial_terms =
     | Ok () -> ()
     | Error e -> Printf.eprintf "Warning: connect %s: %s\n" src.name e
   ) sources_config.sources;
+  let loki_query = make_loki_query net in
   let search = Weft_search.create ~cache
     ~sources:sources_config.sources
     ~formats:formats_config
     ~general:sources_config.general
-    ~conn_pool:pool () in
+    ~conn_pool:pool ~loki_query () in
   List.iter (fun t -> ignore (Weft_search.add_term search t)) initial_terms;
   (cache, pool, search)
 
