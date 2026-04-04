@@ -24,6 +24,7 @@ let render ~width ~height =
     (A.empty, "  r              Reset to full time range");
     (A.empty, "");
     (A.(fg lightyellow), "Views");
+    (A.empty, "  o              Toggle sort order (asc/desc)");
     (A.empty, "  ?              Toggle this help screen");
     (A.empty, "  H              Toggle time heatmap overview");
     (A.empty, "");

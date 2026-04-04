@@ -356,6 +356,8 @@ let handle_key model key =
       (* Restore: enable all terms *)
       Weft_search.enable_all_terms model.search;
       request_refresh model
+    | `ASCII 'o' ->
+      Timeline.toggle_order model.timeline
     | `ASCII '?' ->
       model.overlay <- Help
     | `ASCII 'H' ->
@@ -388,8 +390,10 @@ let render model =
 
   (* Time range bar *)
   let time_str = format_time_range model.time_range in
+  let order_str = Timeline.order_label model.timeline in
   let time_bar = I.string A.(fg lightcyan)
-    (Printf.sprintf " [%s]  </>:shift  -/+:zoom  r:reset  ?:help" time_str) in
+    (Printf.sprintf " [%s] [%s]  </>:shift  -/+:zoom  o:order  r:reset  ?:help"
+       time_str order_str) in
   let time_bar = I.hsnap ~align:`Left w time_bar in
 
   let sep = Theme.hline w in
