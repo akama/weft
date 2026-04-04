@@ -4,15 +4,16 @@
      client -> nginx (reverse proxy) -> api-gateway (OCaml) -> worker-svc (JSON)
                                                              -> auth-svc (JSON)
 
-   A request arrives at nginx, gets a trace_id, flows through the API gateway
-   which calls downstream services. The same trace_id appears in all logs.
-   Some requests fail, producing errors and stack traces.
+   Some successful requests trigger delayed async processing:
+     cron-processor picks up orders/payments 30-120s later,
+     sends notifications, reconciles ledgers. Same trace_id.
 
    Sources:
    - nginx-access.log    Combined access log with X-Trace-Id
    - api-gateway.log     OCaml app with multiline stack traces
-   - worker-svc.log      JSON lines structured logging
-   - auth-svc.log        JSON lines structured logging
+   - worker-svc.log      Worker service (JSON lines)
+   - auth-svc.log        Auth service (JSON lines)
+   - cron-processor.log  Delayed batch processor (JSON lines)
    - syslog.log          System-level background noise
 *)
 
@@ -278,6 +279,97 @@ let simulate_request ~base_time =
   (* Nginx line gets the final timestamp *)
   add "nginx" base_time nginx_line;
 
+  (* Maybe schedule delayed async processing (orders, payments, uploads) *)
+  let delayed = match outcome, path with
+    | Success _, ("/api/v1/orders" | "/api/v1/payments" | "/api/v1/uploads") ->
+      if Random.int 100 < 60 then
+        Some (trace_id, path, status)
+      else None
+    | _ -> None
+  in
+
+  (List.rev !lines, delayed)
+
+(* --- Delayed async processor (cron-processor) --- *)
+
+type delayed_job = {
+  fire_at : float;
+  trace_id : string;
+  path : string;
+  original_status : int; [@warning "-69"]
+}
+
+let simulate_cron_job ~(job : delayed_job) =
+  let lines = ref [] in
+  let add time content = lines := { time; file = "cron-processor"; content } :: !lines in
+  let t = ref job.fire_at in
+  let advance_ms lo hi = t := !t +. (float_of_int (lo + Random.int (hi - lo))) /. 1000.0 in
+
+  let job_type = match job.path with
+    | "/api/v1/orders" -> "order_fulfillment"
+    | "/api/v1/payments" -> "payment_reconciliation"
+    | "/api/v1/uploads" -> "upload_post_processing"
+    | _ -> "generic_async"
+  in
+  let job_id = Printf.sprintf "job_%08x" (Random.bits ()) in
+  let cron_span = gen_span_id () in
+
+  (* Pick up the job *)
+  add !t
+    (Printf.sprintf {|{"ts":%.3f,"level":"info","msg":"job picked up","trace_id":"%s","job_id":"%s","span_id":"%s","job_type":"%s","path":"%s"}|}
+       (!t *. 1000.0) job.trace_id job_id cron_span job_type job.path);
+
+  (* Processing steps *)
+  advance_ms 50 500;
+  let step_name = match job_type with
+    | "order_fulfillment" -> "checking inventory"
+    | "payment_reconciliation" -> "verifying transaction"
+    | "upload_post_processing" -> "generating thumbnails"
+    | _ -> "processing"
+  in
+  add !t
+    (Printf.sprintf {|{"ts":%.3f,"level":"debug","msg":"%s","trace_id":"%s","job_id":"%s","span_id":"%s","duration_ms":%d}|}
+       (!t *. 1000.0) step_name job.trace_id job_id cron_span (50 + Random.int 400));
+
+  (* Maybe a second step *)
+  advance_ms 20 300;
+  let step2 = match job_type with
+    | "order_fulfillment" -> Some "sending confirmation email"
+    | "payment_reconciliation" -> Some "updating ledger"
+    | "upload_post_processing" -> Some "updating search index"
+    | _ -> None
+  in
+  (match step2 with
+   | Some step ->
+     add !t
+       (Printf.sprintf {|{"ts":%.3f,"level":"info","msg":"%s","trace_id":"%s","job_id":"%s","span_id":"%s"}|}
+          (!t *. 1000.0) step job.trace_id job_id cron_span)
+   | None -> ());
+
+  (* Outcome: 85% succeed, 10% fail with retry, 5% dead-letter *)
+  advance_ms 10 100;
+  let r = Random.int 100 in
+  if r < 85 then begin
+    add !t
+      (Printf.sprintf {|{"ts":%.3f,"level":"info","msg":"job completed","trace_id":"%s","job_id":"%s","span_id":"%s","job_type":"%s","status":"success"}|}
+         (!t *. 1000.0) job.trace_id job_id cron_span job_type)
+  end else if r < 95 then begin
+    let retry_err = pick [|"downstream_timeout"; "temporary_failure"; "rate_limited"|] in
+    add !t
+      (Printf.sprintf {|{"ts":%.3f,"level":"warn","msg":"job failed, retrying","trace_id":"%s","job_id":"%s","span_id":"%s","job_type":"%s","error":"%s","attempt":1,"max_attempts":3}|}
+         (!t *. 1000.0) job.trace_id job_id cron_span job_type retry_err);
+    (* Retry after a few seconds *)
+    advance_ms 2000 5000;
+    add !t
+      (Printf.sprintf {|{"ts":%.3f,"level":"info","msg":"job retry succeeded","trace_id":"%s","job_id":"%s","span_id":"%s","job_type":"%s","attempt":2}|}
+         (!t *. 1000.0) job.trace_id job_id cron_span job_type)
+  end else begin
+    let fatal_err = pick [|"invalid_state"; "external_api_down"; "data_corruption"|] in
+    add !t
+      (Printf.sprintf {|{"ts":%.3f,"level":"error","msg":"job failed permanently","trace_id":"%s","job_id":"%s","span_id":"%s","job_type":"%s","error":"%s","sent_to":"dead_letter_queue"}|}
+         (!t *. 1000.0) job.trace_id job_id cron_span job_type fatal_err)
+  end;
+
   List.rev !lines
 
 (* --- Syslog background noise (not correlated) --- *)
@@ -309,19 +401,57 @@ let gen_syslog_line t =
 
 (* --- File writing --- *)
 
-let write_request_logs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~syslog_oc
-    ~base_time =
-  let request_lines = simulate_request ~base_time in
-  List.iter (fun { time = _; file; content } ->
-    let oc = match file with
-      | "nginx" -> nginx_oc
-      | "api-gateway" -> gateway_oc
-      | "worker-svc" -> worker_oc
-      | "auth-svc" -> auth_oc
-      | _ -> gateway_oc
-    in
-    Printf.fprintf oc "%s\n" content
-  ) request_lines;
+(* Pending delayed jobs, sorted by fire_at *)
+let pending_jobs : delayed_job Queue.t = Queue.create ()
+
+let write_line ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+    { time = _; file; content } =
+  let oc = match file with
+    | "nginx" -> nginx_oc
+    | "api-gateway" -> gateway_oc
+    | "worker-svc" -> worker_oc
+    | "auth-svc" -> auth_oc
+    | "cron-processor" -> cron_oc
+    | _ -> gateway_oc
+  in
+  Printf.fprintf oc "%s\n" content
+
+let flush_due_jobs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+    ~syslog_oc ~now =
+  ignore (nginx_oc, gateway_oc, worker_oc, auth_oc, syslog_oc);
+  let rec flush () =
+    if Queue.is_empty pending_jobs then ()
+    else begin
+      let job = Queue.peek pending_jobs in
+      if job.fire_at <= now then begin
+        ignore (Queue.pop pending_jobs);
+        let lines = simulate_cron_job ~job in
+        List.iter (write_line ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc) lines;
+        flush ()
+      end
+    end
+  in
+  flush ()
+
+let write_request_logs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+    ~syslog_oc ~base_time =
+  (* Flush any delayed jobs whose time has come *)
+  flush_due_jobs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+    ~syslog_oc ~now:base_time;
+
+  let (request_lines, delayed) = simulate_request ~base_time in
+  List.iter (write_line ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc) request_lines;
+
+  (* Schedule delayed job if applicable *)
+  (match delayed with
+   | Some (trace_id, path, original_status) ->
+     let delay_s = 30.0 +. Random.float 90.0 in  (* 30-120 seconds later *)
+     Queue.push {
+       fire_at = base_time +. delay_s;
+       trace_id; path; original_status;
+     } pending_jobs
+   | None -> ());
+
   (* Occasional syslog noise *)
   if Random.int 100 < 30 then
     Printf.fprintf syslog_oc "%s\n" (gen_syslog_line base_time)
@@ -334,21 +464,25 @@ let generate_batch ~dir ~count ~start_time ~rotations =
     let s = if suffix = "" then "" else "." ^ suffix in
     let oc name = open_out (Filename.concat dir (name ^ s)) in
     (oc "nginx-access.log", oc "api-gateway.log", oc "worker-svc.log",
-     oc "auth-svc.log", oc "syslog.log")
+     oc "auth-svc.log", oc "cron-processor.log", oc "syslog.log")
   in
-  let close_files (a, b, c, d, e) =
-    List.iter close_out [a; b; c; d; e] in
+  let close_files (a, b, c, d, e, f) =
+    List.iter close_out [a; b; c; d; e; f] in
 
   (* Generate rotated archives first (oldest to newest) *)
   for rot = rotations downto 1 do
     let suffix = string_of_int rot in
+    Queue.clear pending_jobs;
     let files = open_files dir suffix in
-    let (nginx_oc, gateway_oc, worker_oc, auth_oc, syslog_oc) = files in
+    let (nginx_oc, gateway_oc, worker_oc, auth_oc, cron_oc, syslog_oc) = files in
     for _ = 1 to events_per_rotation do
       t_ref := !t_ref +. 0.5 +. Random.float 3.0;
-      write_request_logs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~syslog_oc
-        ~base_time:!t_ref
+      write_request_logs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+        ~syslog_oc ~base_time:!t_ref
     done;
+    (* Flush remaining delayed jobs *)
+    flush_due_jobs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+      ~syslog_oc ~now:Float.infinity;
     close_files files;
     if rot >= 2 then begin
       let compress name =
@@ -357,28 +491,32 @@ let generate_batch ~dir ~count ~start_time ~rotations =
       in
       List.iter compress [
         "nginx-access.log"; "api-gateway.log"; "worker-svc.log";
-        "auth-svc.log"; "syslog.log"
+        "auth-svc.log"; "cron-processor.log"; "syslog.log"
       ]
     end
   done;
 
   (* Generate current (active) log files *)
+  Queue.clear pending_jobs;
   let files = open_files dir "" in
-  let (nginx_oc, gateway_oc, worker_oc, auth_oc, syslog_oc) = files in
+  let (nginx_oc, gateway_oc, worker_oc, auth_oc, cron_oc, syslog_oc) = files in
   let remaining = max (count - events_per_rotation * rotations) events_per_rotation in
   for _ = 1 to remaining do
     t_ref := !t_ref +. 0.5 +. Random.float 3.0;
-    write_request_logs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~syslog_oc
-      ~base_time:!t_ref
+    write_request_logs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+      ~syslog_oc ~base_time:!t_ref
   done;
+  flush_due_jobs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+    ~syslog_oc ~now:Float.infinity;
   close_files files;
 
-  Printf.printf "Generated %d requests across 5 log files in %s\n" count dir;
-  Printf.printf "  nginx-access.log   Reverse proxy (combined + trace_id)\n";
-  Printf.printf "  api-gateway.log    OCaml API gateway (multiline traces)\n";
-  Printf.printf "  worker-svc.log     Worker service (JSON lines)\n";
-  Printf.printf "  auth-svc.log       Auth service (JSON lines)\n";
-  Printf.printf "  syslog.log         System logs\n";
+  Printf.printf "Generated %d requests across 6 log files in %s\n" count dir;
+  Printf.printf "  nginx-access.log     Reverse proxy (combined + trace_id)\n";
+  Printf.printf "  api-gateway.log      OCaml API gateway (multiline traces)\n";
+  Printf.printf "  worker-svc.log       Worker service (JSON lines)\n";
+  Printf.printf "  auth-svc.log         Auth service (JSON lines)\n";
+  Printf.printf "  cron-processor.log   Delayed async jobs (JSON lines, 30-120s later)\n";
+  Printf.printf "  syslog.log           System logs\n";
   if rotations > 0 then begin
     Printf.printf "  Rotated: %d generations" rotations;
     if rotations >= 2 then Printf.printf " (.2+ gzipped)";
@@ -448,6 +586,16 @@ format = "epoch_ms"
 type = "json_field_extract"
 fields = ["level", "msg", "trace_id", "span_id", "parent_span", "user_id", "reason", "method", "path"]
 
+# --- Cron processor (delayed async jobs, JSON lines) ---
+[format.cron_json]
+[format.cron_json.timestamp]
+json_field = "ts"
+format = "epoch_ms"
+
+[[format.cron_json.middleware]]
+type = "json_field_extract"
+fields = ["level", "msg", "trace_id", "job_id", "span_id", "job_type", "error", "status", "attempt", "max_attempts", "sent_to", "path", "duration_ms"]
+
 # --- Syslog ---
 [format.syslog]
 [format.syslog.timestamp]
@@ -502,11 +650,17 @@ path = "%s/auth-svc.log"
 format = "auth_json"
 
 [[source]]
+name = "cron"
+type = "file"
+path = "%s/cron-processor.log"
+format = "cron_json"
+
+[[source]]
 name = "syslog"
 type = "file"
 path = "%s/syslog.log"
 format = "syslog"
-|} dir dir dir dir dir dir;
+|} dir dir dir dir dir dir dir;
   close_out sources_oc;
 
   Printf.printf "Config: %s, %s\n" formats_path sources_path
@@ -518,6 +672,7 @@ let live_append ~dir ~interval_ms =
   let gateway_oc = oc "api-gateway.log" in
   let worker_oc = oc "worker-svc.log" in
   let auth_oc = oc "auth-svc.log" in
+  let cron_oc = oc "cron-processor.log" in
   let syslog_oc = oc "syslog.log" in
 
   Printf.printf "Live mode: appending requests every %dms (Ctrl-C to stop)\n%!" interval_ms;
@@ -525,25 +680,20 @@ let live_append ~dir ~interval_ms =
   let running = ref true in
   Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ -> running := false));
 
+  let flush_oc oc = Printf.fprintf oc "%!" in
+
   while !running do
     let t = Unix.gettimeofday () in
-    let request_lines = simulate_request ~base_time:t in
-    List.iter (fun { time = _; file; content } ->
-      let oc = match file with
-        | "nginx" -> nginx_oc
-        | "api-gateway" -> gateway_oc
-        | "worker-svc" -> worker_oc
-        | "auth-svc" -> auth_oc
-        | _ -> gateway_oc
-      in
-      Printf.fprintf oc "%s\n%!" content
-    ) request_lines;
-    if Random.int 100 < 30 then
-      Printf.fprintf syslog_oc "%s\n%!" (gen_syslog_line t);
+    write_request_logs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+      ~syslog_oc ~base_time:t;
+    List.iter flush_oc [nginx_oc; gateway_oc; worker_oc; auth_oc; cron_oc; syslog_oc];
     Unix.sleepf (float_of_int interval_ms /. 1000.0)
   done;
 
-  List.iter close_out [nginx_oc; gateway_oc; worker_oc; auth_oc; syslog_oc];
+  (* Flush remaining delayed jobs *)
+  flush_due_jobs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+    ~syslog_oc ~now:Float.infinity;
+  List.iter close_out [nginx_oc; gateway_oc; worker_oc; auth_oc; cron_oc; syslog_oc];
   Printf.printf "\nStopped.\n"
 
 let () =
