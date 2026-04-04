@@ -358,6 +358,12 @@ let remove_term t term_str =
 let toggle_term t term_str =
   Term_manager.toggle_term t.term_manager term_str
 
+let isolate_term t term_str =
+  Term_manager.isolate_term t.term_manager term_str
+
+let enable_all_terms t =
+  Term_manager.enable_all_terms t.term_manager
+
 let enabled_terms t =
   Term_manager.enabled_terms t.term_manager
 

@@ -38,3 +38,13 @@ let all_terms t = t.terms
 
 let find_term t term_str =
   List.find_opt (fun (st : search_term) -> st.term = term_str) t.terms
+
+let isolate_term t term_str =
+  t.terms <- List.map (fun (st : search_term) ->
+    { st with enabled = (st.term = term_str) }
+  ) t.terms
+
+let enable_all_terms t =
+  t.terms <- List.map (fun (st : search_term) ->
+    { st with enabled = true }
+  ) t.terms
