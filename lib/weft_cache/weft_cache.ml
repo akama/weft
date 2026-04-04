@@ -86,9 +86,13 @@ let read_cached_lines t ~source_name =
   match get_manifest t source_name with
   | None -> []
   | Some manifest ->
+    (* Sort segments by start time so lines come out chronologically *)
+    let sorted = List.sort (fun (a : segment) (b : segment) ->
+      Ptime.compare a.time_range.start_ b.time_range.start_
+    ) manifest.segments in
     List.concat_map (fun seg ->
       Segment.read_lines ~fs:t.fs ~dir seg
-    ) manifest.segments
+    ) sorted
 
 let time_coverage t source_name =
   match get_manifest t source_name with

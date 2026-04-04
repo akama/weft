@@ -241,50 +241,76 @@ let gen_nginx_line t =
 
 (* --- File generation --- *)
 
-let generate_batch ~dir ~count ~start_time =
+(* Write events to a single output channel across all formats *)
+let write_events ~syslog_oc ~json_oc ~ocaml_oc ~nginx_oc ~t_ref ~count =
+  for _ = 1 to count do
+    t_ref := !t_ref +. 0.1 +. Random.float 4.9;
+    if Random.int 100 < 60 then
+      Printf.fprintf syslog_oc "%s\n" (gen_syslog_line !t_ref);
+    if Random.int 100 < 70 then
+      Printf.fprintf json_oc "%s\n" (gen_json_line !t_ref);
+    if Random.int 100 < 50 then begin
+      let include_exception = Random.int 100 < 10 in
+      let lines = gen_ocaml_line !t_ref ~include_exception in
+      List.iter (fun l -> Printf.fprintf ocaml_oc "%s\n" l) lines
+    end;
+    if Random.int 100 < 80 then
+      Printf.fprintf nginx_oc "%s\n" (gen_nginx_line !t_ref);
+  done
+
+let generate_batch ~dir ~count ~start_time ~rotations =
+  let t_ref = ref start_time in
+  let events_per_rotation = count / (rotations + 1) in
+
+  (* Generate rotated archives first (oldest to newest) *)
+  for rot = rotations downto 1 do
+    let suffix = string_of_int rot in
+    let syslog_path = Filename.concat dir ("syslog.log." ^ suffix) in
+    let json_path = Filename.concat dir ("app-json.log." ^ suffix) in
+    let ocaml_path = Filename.concat dir ("app-ocaml.log." ^ suffix) in
+    let nginx_path = Filename.concat dir ("nginx-access.log." ^ suffix) in
+    let syslog_oc = open_out syslog_path in
+    let json_oc = open_out json_path in
+    let ocaml_oc = open_out ocaml_path in
+    let nginx_oc = open_out nginx_path in
+    write_events ~syslog_oc ~json_oc ~ocaml_oc ~nginx_oc ~t_ref
+      ~count:events_per_rotation;
+    close_out syslog_oc;
+    close_out json_oc;
+    close_out ocaml_oc;
+    close_out nginx_oc;
+    (* Compress older archives with gzip *)
+    if rot >= 2 then begin
+      List.iter (fun p ->
+        ignore (Sys.command (Printf.sprintf "gzip -f '%s'" p))
+      ) [syslog_path; json_path; ocaml_path; nginx_path]
+    end
+  done;
+
+  (* Generate current (active) log files *)
   let syslog_path = Filename.concat dir "syslog.log" in
   let json_path = Filename.concat dir "app-json.log" in
   let ocaml_path = Filename.concat dir "app-ocaml.log" in
   let nginx_path = Filename.concat dir "nginx-access.log" in
-
   let syslog_oc = open_out syslog_path in
   let json_oc = open_out json_path in
   let ocaml_oc = open_out ocaml_path in
   let nginx_oc = open_out nginx_path in
-
-  let t = ref start_time in
-  for _ = 1 to count do
-    (* Advance time by 0.1-5 seconds *)
-    t := !t +. 0.1 +. Random.float 4.9;
-
-    (* Syslog: ~60% of lines *)
-    if Random.int 100 < 60 then
-      Printf.fprintf syslog_oc "%s\n" (gen_syslog_line !t);
-
-    (* JSON: ~70% of lines *)
-    if Random.int 100 < 70 then
-      Printf.fprintf json_oc "%s\n" (gen_json_line !t);
-
-    (* OCaml app: ~50%, with 10% chance of exception *)
-    if Random.int 100 < 50 then begin
-      let include_exception = Random.int 100 < 10 in
-      let lines = gen_ocaml_line !t ~include_exception in
-      List.iter (fun l -> Printf.fprintf ocaml_oc "%s\n" l) lines
-    end;
-
-    (* Nginx: ~80% *)
-    if Random.int 100 < 80 then
-      Printf.fprintf nginx_oc "%s\n" (gen_nginx_line !t);
-  done;
-
+  let remaining = count - (events_per_rotation * rotations) in
+  write_events ~syslog_oc ~json_oc ~ocaml_oc ~nginx_oc ~t_ref
+    ~count:(max remaining events_per_rotation);
   close_out syslog_oc;
   close_out json_oc;
   close_out ocaml_oc;
   close_out nginx_oc;
 
   Printf.printf "Generated %d events across 4 log files in %s\n" count dir;
-  Printf.printf "  %s\n  %s\n  %s\n  %s\n"
-    syslog_path json_path ocaml_path nginx_path
+  Printf.printf "  Active: syslog.log, app-json.log, app-ocaml.log, nginx-access.log\n";
+  if rotations > 0 then begin
+    Printf.printf "  Rotated: %d generations" rotations;
+    if rotations >= 2 then Printf.printf " (.2+ are gzipped)";
+    Printf.printf "\n"
+  end
 
 let generate_config ~dir =
   let formats_path = Filename.concat dir "formats.toml" in
@@ -430,6 +456,7 @@ let live_append ~dir ~interval_ms =
 let () =
   let dir = ref "/tmp/weft-test" in
   let count = ref 1000 in
+  let rotations = ref 0 in
   let live = ref false in
   let live_interval = ref 200 in
   let args = Array.to_list Sys.argv |> List.tl in
@@ -437,6 +464,7 @@ let () =
     | [] -> ()
     | "--dir" :: d :: rest -> dir := d; parse rest
     | "--count" :: n :: rest -> count := int_of_string n; parse rest
+    | "--rotations" :: n :: rest -> rotations := int_of_string n; parse rest
     | "--live" :: rest -> live := true; parse rest
     | "--interval" :: n :: rest -> live_interval := int_of_string n; parse rest
     | "--help" :: _ | "-h" :: _ ->
@@ -445,16 +473,17 @@ let () =
       Printf.printf "Options:\n";
       Printf.printf "  --dir <path>       Output directory (default: /tmp/weft-test)\n";
       Printf.printf "  --count <n>        Number of events to generate (default: 1000)\n";
+      Printf.printf "  --rotations <n>    Number of rotated archive generations (default: 0)\n";
       Printf.printf "  --live             Keep appending after initial generation\n";
       Printf.printf "  --interval <ms>    Live mode interval in ms (default: 200)\n";
       Printf.printf "  -h, --help         Show this help\n\n";
       Printf.printf "Output:\n";
-      Printf.printf "  <dir>/syslog.log        Syslog BSD format\n";
-      Printf.printf "  <dir>/app-json.log      JSON lines (structured)\n";
-      Printf.printf "  <dir>/app-ocaml.log     OCaml app (multiline stack traces)\n";
-      Printf.printf "  <dir>/nginx-access.log  Nginx combined access log\n";
-      Printf.printf "  <dir>/formats.toml      Format definitions for weft\n";
-      Printf.printf "  <dir>/sources.toml      Source config pointing to generated files\n";
+      Printf.printf "  <dir>/syslog.log          Active log (+ .1, .2.gz, ... if rotated)\n";
+      Printf.printf "  <dir>/app-json.log        JSON lines (+ rotated)\n";
+      Printf.printf "  <dir>/app-ocaml.log       OCaml app (+ rotated)\n";
+      Printf.printf "  <dir>/nginx-access.log    Nginx (+ rotated)\n";
+      Printf.printf "  <dir>/formats.toml        Format definitions for weft\n";
+      Printf.printf "  <dir>/sources.toml        Source config\n";
       exit 0
     | x :: _ ->
       Printf.eprintf "Unknown argument: %s\n" x;
@@ -466,7 +495,7 @@ let () =
   (try Unix.mkdir !dir 0o755 with Unix.Unix_error (Unix.EEXIST, _, _) -> ());
 
   let start_time = now_epoch () -. (float_of_int !count *. 2.5) in
-  generate_batch ~dir:!dir ~count:!count ~start_time;
+  generate_batch ~dir:!dir ~count:!count ~start_time ~rotations:!rotations;
   generate_config ~dir:!dir;
 
   Printf.printf "\nTo test weft:\n";

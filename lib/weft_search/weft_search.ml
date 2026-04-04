@@ -74,22 +74,74 @@ let process_through_pipeline pipeline ~source lines =
   | Some pl ->
     Weft_middleware.Pipeline.process_lines pl ~source lines
 
-(* Read lines for a source — check cache first, populate if needed *)
+(* Discover and cache archives for a source *)
+let discover_and_cache_archives adapter cache =
+  match adapter.config.path with
+  | None -> ()
+  | Some path ->
+    let archives = Weft_source.Archive.discover_local ~path
+      |> Weft_source.Archive.sort_by_mtime in
+    if archives <> [] then begin
+      (* Update known archives in manifest *)
+      Weft_cache.update_archives cache ~source_name:adapter.name archives;
+      (* Cache each archive that isn't already cached *)
+      List.iter (fun (archive : archive_info) ->
+        let archive_origin = Filename.basename archive.remote_path in
+        (* Check if we already have a segment for this archive *)
+        let already_cached = match Weft_cache.get_manifest cache adapter.name with
+          | None -> false
+          | Some m ->
+            List.exists (fun (seg : segment) ->
+              seg.origin = archive_origin
+            ) m.segments
+        in
+        if not already_cached then begin
+          (* Decompress if needed, then cache *)
+          if Weft_source.Archive.is_compressed archive.remote_path then begin
+            match Weft_source.Archive.decompressor_for archive.remote_path with
+            | Some decomp_cmd ->
+              (* Decompress to a temp file, then cache it *)
+              let tmp = Filename.temp_file "weft_archive_" ".log" in
+              let ret = Sys.command
+                (Printf.sprintf "%s '%s' > '%s' 2>/dev/null"
+                   decomp_cmd archive.remote_path tmp) in
+              if ret = 0 then begin
+                ignore (Weft_cache.cache_file cache
+                  ~source_name:adapter.name
+                  ~origin:archive_origin
+                  ~path:tmp)
+              end;
+              (try Sys.remove tmp with _ -> ())
+            | None -> ()
+          end else begin
+            (* Uncompressed archive — cache directly *)
+            ignore (Weft_cache.cache_file cache
+              ~source_name:adapter.name
+              ~origin:archive_origin
+              ~path:archive.remote_path)
+          end
+        end
+      ) archives
+    end
+
+(* Read lines for a source — check cache first, populate if needed.
+   Also discovers and caches any rotated archives. *)
 let read_source_lines adapter cache =
-  (* Check cache first *)
   if Weft_cache.is_cached cache ~source_name:adapter.name then
     Weft_cache.read_cached_lines cache ~source_name:adapter.name
   else begin
-    (* Not cached — read from file and populate cache *)
-    match adapter.config.path with
-    | Some path when Sys.file_exists path ->
-      ignore (Weft_cache.cache_file cache
-        ~source_name:adapter.name
-        ~origin:(Filename.basename path)
-        ~path);
-      (* Now read back from cache *)
-      Weft_cache.read_cached_lines cache ~source_name:adapter.name
-    | _ -> []
+    (* Cache the active file *)
+    (match adapter.config.path with
+     | Some path when Sys.file_exists path ->
+       ignore (Weft_cache.cache_file cache
+         ~source_name:adapter.name
+         ~origin:(Filename.basename path)
+         ~path)
+     | _ -> ());
+    (* Discover and cache archives *)
+    discover_and_cache_archives adapter cache;
+    (* Read everything from cache *)
+    Weft_cache.read_cached_lines cache ~source_name:adapter.name
   end
 
 (* Batch search for a single source — reads file, runs pipeline, filters *)
@@ -98,7 +150,6 @@ let search_source t adapter ~terms ~time_range =
   if lines = [] then Seq.empty
   else begin
     let entries = process_through_pipeline adapter.pipeline ~source:adapter.name lines in
-    (* Filter by search terms *)
     let term_res = List.map (fun term ->
       (term, Re.compile (Re.Pcre.re (Re.Pcre.quote term)))
     ) terms in
@@ -106,7 +157,6 @@ let search_source t adapter ~terms ~time_range =
       List.exists (fun (_term, re) -> Re.execp re entry.raw) term_res
     ) entries in
     let tagged = List.map (tag_terms terms) filtered in
-    (* Filter by time range *)
     let in_range = match time_range with
       | None -> tagged
       | Some tr ->
@@ -130,7 +180,7 @@ let search t ~time_range =
     ) t.sources in
     Weft_merge.Batch_merge.merge_with_dedup streams
 
-(* Search without terms — just load and merge all entries from all sources *)
+(* Load all entries without term filtering *)
 let load_all t =
   let streams = List.map (fun adapter ->
     let lines = read_source_lines adapter t.cache in
@@ -139,7 +189,6 @@ let load_all t =
   ) t.sources in
   Weft_merge.Batch_merge.merge streams
 
-(* Add a new search term with incremental catch-up *)
 let add_term t term_str =
   match Term_manager.add_term t.term_manager term_str with
   | None -> None
