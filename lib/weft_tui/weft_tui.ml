@@ -94,7 +94,7 @@ let handle_key model key =
          Sidebar.move_term_selection model.sidebar ~terms (-1))
     | `Enter ->
       Detail.toggle model.detail
-    | `ASCII '\t' ->
+    | `Tab | `ASCII '\t' ->
       model.focus <- (match model.focus with
         | Sources -> Terms
         | Terms -> Timeline
