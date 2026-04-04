@@ -25,14 +25,17 @@ let render t ~width =
     else if age < 10.0 then A.(fg lightblack)
     else (t.message <- ""; A.(fg lightblack))
   in
-  if t.message = "" then
-    (* Always render a 1-high line to keep layout stable *)
-    I.string A.empty (String.make width ' ')
+  let text = if t.message = "" then
+    String.make width ' '
   else
     let msg = if String.length t.message > width - 2 then
       String.sub t.message 0 (width - 2)
     else t.message in
-    I.string attr (" " ^ msg) |> I.hsnap ~align:`Left width
+    let line = " " ^ msg in
+    let pad = max 0 (width - String.length line) in
+    line ^ String.make pad ' '
+  in
+  I.string attr text
 
 (* Global instance — modules can set status without passing the ref around *)
 let global = create ()
