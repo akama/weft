@@ -13,8 +13,8 @@ let create () =
 
 let set_entries t entries =
   t.entries <- Array.of_list entries;
-  if t.selected >= Array.length t.entries then
-    t.selected <- max 0 (Array.length t.entries - 1)
+  t.scroll_offset <- 0;
+  t.selected <- 0
 
 let append_entry t entry =
   let old_len = Array.length t.entries in
