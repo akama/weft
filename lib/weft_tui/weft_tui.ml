@@ -29,6 +29,26 @@ let create ~search =
     height = 24;
   }
 
+(* Re-run search and update timeline *)
+let refresh_search model =
+  let terms = Weft_search.enabled_terms model.search in
+  if terms <> [] then begin
+    let entries = Weft_search.search model.search ~time_range:None in
+    let entry_list = List.of_seq (Seq.take 10000 entries) in
+    (* Filter out disabled sources *)
+    let filtered = List.filter (fun (e : Weft_types.log_entry) ->
+      Sidebar.is_source_enabled model.sidebar e.source
+    ) entry_list in
+    Timeline.set_entries model.timeline filtered
+  end else begin
+    let entries = Weft_search.load_all model.search in
+    let entry_list = List.of_seq (Seq.take 10000 entries) in
+    let filtered = List.filter (fun (e : Weft_types.log_entry) ->
+      Sidebar.is_source_enabled model.sidebar e.source
+    ) entry_list in
+    Timeline.set_entries model.timeline filtered
+  end
+
 (* Handle keyboard input *)
 let handle_key model key =
   if Search_bar.is_active model.search_bar then begin
@@ -38,7 +58,8 @@ let handle_key model key =
     | `Enter ->
       (match Search_bar.submit model.search_bar with
        | Some term ->
-         ignore (Weft_search.add_term model.search term)
+         ignore (Weft_search.add_term model.search term);
+         refresh_search model
        | None -> ())
     | `Backspace ->
       Search_bar.handle_backspace model.search_bar
@@ -56,11 +77,21 @@ let handle_key model key =
     | `ASCII 'q' ->
       model.quit <- true
     | `ASCII 'j' | `Arrow `Down ->
-      if model.focus = Timeline then
-        Timeline.scroll_down model.timeline
+      (match model.focus with
+       | Timeline -> Timeline.scroll_down model.timeline
+       | Sources ->
+         Sidebar.move_source_selection model.sidebar 1
+       | Terms ->
+         let terms = Weft_search.all_terms model.search in
+         Sidebar.move_term_selection model.sidebar ~terms 1)
     | `ASCII 'k' | `Arrow `Up ->
-      if model.focus = Timeline then
-        Timeline.scroll_up model.timeline
+      (match model.focus with
+       | Timeline -> Timeline.scroll_up model.timeline
+       | Sources ->
+         Sidebar.move_source_selection model.sidebar (-1)
+       | Terms ->
+         let terms = Weft_search.all_terms model.search in
+         Sidebar.move_term_selection model.sidebar ~terms (-1))
     | `Enter ->
       Detail.toggle model.detail
     | `ASCII '\t' ->
@@ -69,12 +100,26 @@ let handle_key model key =
         | Terms -> Timeline
         | Timeline -> Sources)
     | `ASCII 's' ->
-      () (* Toggle source — would need source selection *)
+      (* Toggle selected source on/off *)
+      (match Sidebar.toggle_selected_source model.sidebar with
+       | Some _sid -> refresh_search model
+       | None -> ())
     | `ASCII 't' ->
-      () (* Toggle term — would need term selection *)
+      (* Toggle selected term visibility *)
+      let terms = Weft_search.all_terms model.search in
+      (match Sidebar.selected_term_name model.sidebar ~terms with
+       | Some term_name ->
+         Weft_search.toggle_term model.search term_name;
+         refresh_search model
+       | None -> ())
     | `ASCII 'd' ->
-      (* Delete selected term — simplified *)
-      ()
+      (* Delete selected term *)
+      let terms = Weft_search.all_terms model.search in
+      (match Sidebar.selected_term_name model.sidebar ~terms with
+       | Some term_name ->
+         Weft_search.remove_term model.search term_name;
+         refresh_search model
+       | None -> ())
     | _ -> ()
   end
 
@@ -83,9 +128,8 @@ let render model =
   let w = model.width in
   let h = model.height in
 
-  (* Layout calculations *)
   let sidebar_width = min 15 (w / 5) in
-  let main_width = w - sidebar_width - 1 in (* -1 for separator *)
+  let main_width = w - sidebar_width - 1 in
 
   let search_height = 1 in
   let detail_height = if Detail.is_expanded model.detail then min 10 (h / 3) else 0 in
@@ -94,36 +138,28 @@ let render model =
 
   let terms = Weft_search.all_terms model.search in
 
-  (* Search bar *)
   let search_img = Search_bar.render model.search_bar ~width:w in
-
-  (* Separator *)
   let sep = Theme.hline w in
 
-  (* Sidebar *)
+  let sidebar_focus = match model.focus with
+    | Sources -> `Sources | Terms -> `Terms | Timeline -> `None in
   let sidebar_img = Sidebar.render model.sidebar
-    ~terms ~width:sidebar_width ~height:timeline_height in
+    ~terms ~width:sidebar_width ~height:timeline_height ~focus:sidebar_focus in
 
-  (* Vertical separator *)
   let vsep = Theme.vline timeline_height in
 
-  (* Timeline *)
   let timeline_img = Timeline.render model.timeline
     ~width:main_width ~height:timeline_height ~term_list:terms in
 
-  (* Main area: sidebar | vsep | timeline *)
   let main_row = I.hcat [sidebar_img; vsep; timeline_img] in
 
-  (* Progress bar (if any active tasks) *)
   let progress_img = Progress.render model.progress ~width:w in
 
-  (* Detail pane *)
   let detail_sep = if detail_height > 0 then Theme.hline w else I.empty in
   let detail_img = Detail.render model.detail
     ~entry:(Timeline.selected_entry model.timeline)
     ~width:w ~height:detail_height in
 
-  (* Compose everything *)
   I.vcat ([
     search_img;
     sep;
@@ -131,7 +167,6 @@ let render model =
   ] @ (if progress_height > 0 then [progress_img] else [])
     @ (if detail_height > 0 then [detail_sep; detail_img] else []))
 
-(* Nottui integration: create an Lwd-reactive UI *)
 let run_ui model term =
   let img = ref (render model) in
   let rec loop () =
