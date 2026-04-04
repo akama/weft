@@ -134,7 +134,6 @@ let cache_maintenance_fiber ~cache ~sources =
 let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
   let fs = Eio.Stdenv.fs env in
   let proc = Eio.Stdenv.process_mgr env in
-  let clock = Eio.Stdenv.clock env in
   let cache = Weft_cache.create ~fs sources_config.cache in
 
   List.iter (fun (src : source_config) ->
@@ -245,37 +244,45 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
       drain ()
     in
 
+    (* Get the terminal input fd for select-based polling *)
+    let (input_fd, _output_fd) = Notty_unix.Term.fds term in
+
+    let handle_terminal_event () =
+      match Notty_unix.Term.event term with
+      | `End | `Key (`ASCII 'C', [`Ctrl]) -> false
+      | `Key (key, _mods) ->
+        Weft_tui.handle_key model key;
+        let new_terms = Weft_search.enabled_terms search in
+        if new_terms <> !terms_ref then begin
+          terms_ref := new_terms;
+          Weft_tui.refresh_search model
+        end;
+        let (w, h) = Notty_unix.Term.size term in
+        model.width <- w;
+        model.height <- h;
+        not model.quit
+      | `Resize (w, h) ->
+        model.width <- w;
+        model.height <- h;
+        true
+      | `Mouse _ | `Paste _ -> true
+    in
+
     let running = ref true in
     while !running do
-      (* Yield to Eio scheduler so source/merge fibers can run *)
       Eio.Fiber.yield ();
-
       drain_entries ();
+
       let img = Weft_tui.render model in
       Notty_unix.Term.image term img;
 
-      if Notty_unix.Term.pending term then begin
-        match Notty_unix.Term.event term with
-        | `End | `Key (`ASCII 'C', [`Ctrl]) ->
-          running := false
-        | `Key (key, _mods) ->
-          Weft_tui.handle_key model key;
-          let new_terms = Weft_search.enabled_terms search in
-          if new_terms <> !terms_ref then begin
-            terms_ref := new_terms;
-            Weft_tui.refresh_search model
-          end;
-          if model.quit then running := false;
-          let (w, h) = Notty_unix.Term.size term in
-          model.width <- w;
-          model.height <- h
-        | `Resize (w, h) ->
-          model.width <- w;
-          model.height <- h
-        | `Mouse _ | `Paste _ -> ()
-      end else
-        (* Sleep via Eio so other fibers can run *)
-        Eio.Time.sleep clock 0.016
+      (* Check if terminal has input ready (50ms timeout) *)
+      let ready, _, _ = Unix.select [input_fd] [] [] 0.05 in
+      if ready <> [] || Notty_unix.Term.pending term then
+        running := handle_terminal_event ()
+      else
+        (* No input — yield to let other fibers run *)
+        Eio.Fiber.yield ()
     done;
 
     (* Cancel switch to stop all fibers *)
