@@ -358,6 +358,9 @@ let handle_key model key =
       request_refresh model
     | `ASCII 'o' ->
       Timeline.toggle_order model.timeline
+    | `ASCII 'R' ->
+      (* Force refresh — re-read sources and invalidate cache *)
+      request_refresh model
     | `ASCII '?' ->
       model.overlay <- Help
     | `ASCII 'H' ->

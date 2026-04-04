@@ -136,8 +136,15 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
     Eio.Stream.create 1 in
   let search_results : (log_entry list) Eio.Stream.t =
     Eio.Stream.create 1 in
+  (* Tail entries — new entries from live source fibers *)
+  let tail_entries : log_entry Eio.Stream.t =
+    Eio.Stream.create 4096 in
+  let tail_cancel = Atomic.make false in
+
+  let fs = Eio.Stdenv.fs env in
 
   Fun.protect ~finally:(fun () ->
+    Atomic.set tail_cancel true;
     Notty_unix.Term.release term;
     Weft_connection.Conn_pool.close_all pool
   ) (fun () ->
@@ -146,9 +153,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
     (* Search fiber — picks up requests, runs search, posts results *)
     Eio.Fiber.fork ~sw (fun () ->
       while true do
-        (* Wait for a search request *)
         let params = Eio.Stream.take search_requests in
-        (* Drain any queued requests — only run the latest *)
         let params = ref params in
         let rec drain () =
           match Eio.Stream.take_nonblocking search_requests with
@@ -157,13 +162,154 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
         in
         drain ();
         let results = Weft_tui.do_search_with search !params in
-        (* Clear any old results and post new *)
         ignore (Eio.Stream.take_nonblocking search_results);
         Eio.Stream.add search_results results
       done
     );
 
-    (* TUI fiber — main event loop *)
+    (* Per-source tail fibers — watch for new entries and push to tail_entries *)
+    List.iter (fun (src : source_config) ->
+      let fmt = Weft_config.resolve_format formats_config src.format in
+      let pipeline = Option.map Weft_middleware.Pipeline.create fmt in
+      let pipeline_state = Option.map (fun pl ->
+        Weft_middleware.Pipeline.create_stream_state pl ~source:src.name
+      ) pipeline in
+
+      let emit_line source line =
+        let entries_to_emit = match pipeline_state with
+          | None ->
+            [{ timestamp = Ptime_clock.now (); raw = line; source;
+               terms = []; metadata = [] }]
+          | Some state ->
+            Weft_middleware.Pipeline.feed_line state line
+        in
+        (* Tag with current search terms *)
+        let current_terms = !terms_ref in
+        let term_res = List.map (fun t ->
+          (t, Re.compile (Re.Pcre.re (Re.Pcre.quote t)))
+        ) current_terms in
+        List.iter (fun (entry : log_entry) ->
+          let dominated = match term_res with
+            | [] -> true
+            | _ -> List.exists (fun (_t, re) -> Re.execp re entry.raw) term_res
+          in
+          if dominated then begin
+            let entry = match term_res with
+              | [] -> entry
+              | _ ->
+                let matched = List.filter_map (fun (t, re) ->
+                  if Re.execp re entry.raw then Some t else None
+                ) term_res in
+                { entry with terms = matched }
+            in
+            (* Non-blocking: drop if stream is full rather than blocking the tail *)
+            ignore (Eio.Stream.take_nonblocking tail_entries |> ignore;
+                    Eio.Stream.add tail_entries entry; true)
+          end
+        ) entries_to_emit
+      in
+
+      match src.source_type with
+      | File ->
+        (match src.path with
+         | Some path when Sys.file_exists path ->
+           Eio.Fiber.fork ~sw (fun () ->
+             let adapter : Weft_source.Local_file.t = {
+               config = src; path; fs;
+             } in
+             let drain_timeout = match fmt with
+               | Some f -> (match f.rotation with
+                 | Some rc -> float_of_int rc.drain_timeout_sec
+                 | None -> 5.0)
+               | None -> 5.0
+             in
+             let rotation_cbs : Weft_source.Local_file.rotation_callbacks = {
+               on_seal = (fun () ->
+                 Weft_tui.Status.set model.status
+                   (Printf.sprintf "Rotation: sealed %s" src.name));
+               on_new = (fun () ->
+                 ignore (Weft_cache.new_segment cache
+                   ~source_name:src.name ~origin:(Filename.basename path));
+                 Weft_tui.Status.set model.status
+                   (Printf.sprintf "Rotation: new segment for %s" src.name));
+             } in
+             (try
+                Weft_source.Local_file.tail adapter ~terms:[]
+                  ~emit:(fun entry -> emit_line src.name entry.raw)
+                  ~cancel:tail_cancel ~on_rotation:rotation_cbs
+                  ~drain_timeout ()
+              with exn ->
+                Weft_tui.Status.set model.status
+                  (Printf.sprintf "Tail %s ended: %s" src.name
+                     (Printexc.to_string exn)))
+           )
+         | _ -> ())
+
+      | Remote ->
+        (match src.transport, src.path with
+         | Some _transport, Some path ->
+           let ssh = match Weft_connection.Conn_pool.get_connection pool src.name with
+             | Some conn -> conn.ssh
+             | None -> None
+           in
+           (match ssh with
+            | Some ssh ->
+              Eio.Fiber.fork ~sw (fun () ->
+                Weft_tui.Status.set model.status
+                  (Printf.sprintf "Tailing %s via SSH..." src.name);
+                let tail_cmd = ["tail"; "-n"; "0"; "-F"; path] in
+                (try
+                   Weft_connection.Ssh_control.run_streaming ssh tail_cmd
+                     ~on_line:(fun line -> emit_line src.name line)
+                     ~on_stderr:(fun line ->
+                       match Weft_source.Rotation.detect_from_tail_stderr line with
+                       | Some Weft_source.Rotation.File_renamed ->
+                         Weft_tui.Status.set model.status
+                           (Printf.sprintf "SSH rotation: %s" src.name)
+                       | Some Weft_source.Rotation.File_truncated ->
+                         Weft_tui.Status.set model.status
+                           (Printf.sprintf "SSH truncate: %s" src.name)
+                       | None -> ())
+                     ~cancel:tail_cancel
+                 with Failure msg ->
+                   Weft_tui.Status.set model.status
+                     (Printf.sprintf "SSH tail %s: %s" src.name msg))
+              )
+            | None -> ())
+         | _ -> ())
+
+      | Loki ->
+        (* Loki: periodic poll every 5 seconds for new entries *)
+        (match src.url with
+         | Some _url ->
+           Eio.Fiber.fork ~sw (fun () ->
+             while not (Atomic.get tail_cancel) do
+               Eio.Time.sleep clock 5.0;
+               if not (Atomic.get tail_cancel) then begin
+                 (* Re-query Loki for the last 10 seconds *)
+                 let now = Ptime_clock.now () in
+                 let ten_sec_ago = match Ptime.sub_span now
+                   (Ptime.Span.of_int_s 10) with
+                   | Some t -> t | None -> now in
+                 let params = {
+                   Weft_tui.sp_time_range = Some { start_ = ten_sec_ago;
+                                                    end_ = Some now };
+                   sp_terms = !terms_ref;
+                   sp_disabled = model.sidebar.disabled_sources;
+                 } in
+                 let results = Weft_tui.do_search_with search params in
+                 List.iter (fun entry ->
+                   Eio.Stream.add tail_entries entry
+                 ) results
+               end
+             done
+           )
+         | None -> ())
+
+      | Directory -> ()
+    ) sources_config.sources;
+
+    (* TUI event loop *)
     let (input_fd, _output_fd) = Notty_unix.Term.fds term in
 
     let handle_terminal_event () =
@@ -189,7 +335,6 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       if !(Weft_tui.needs_refresh) then begin
         Weft_tui.needs_refresh := false;
         let params = Weft_tui.snapshot_params model in
-        (* Non-blocking add — if channel full, drain and re-add *)
         ignore (Eio.Stream.take_nonblocking search_requests);
         Eio.Stream.add search_requests params
       end;
@@ -203,6 +348,22 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
          Weft_tui.Status.set model.status
            (Printf.sprintf "%d entries [%s]" (List.length results) range_desc)
        | None -> ());
+
+      (* Pick up new tail entries *)
+      let new_count = ref 0 in
+      let rec drain_tail () =
+        match Eio.Stream.take_nonblocking tail_entries with
+        | Some entry ->
+          Weft_tui.Timeline.append_entry model.timeline entry;
+          incr new_count;
+          drain_tail ()
+        | None -> ()
+      in
+      drain_tail ();
+      if !new_count > 0 then
+        Weft_tui.Status.set model.status
+          (Printf.sprintf "+%d new (%d total)"
+             !new_count (Weft_tui.Timeline.entry_count model.timeline));
 
       (* Render *)
       let img = Weft_tui.render model in
