@@ -665,35 +665,88 @@ format = "syslog"
 
   Printf.printf "Config: %s, %s\n" formats_path sources_path
 
-let live_append ~dir ~interval_ms =
-  let oc name = open_out_gen [Open_append; Open_creat] 0o644
-    (Filename.concat dir name) in
-  let nginx_oc = oc "nginx-access.log" in
-  let gateway_oc = oc "api-gateway.log" in
-  let worker_oc = oc "worker-svc.log" in
-  let auth_oc = oc "auth-svc.log" in
-  let cron_oc = oc "cron-processor.log" in
-  let syslog_oc = oc "syslog.log" in
+let log_names = [
+  "nginx-access.log"; "api-gateway.log"; "worker-svc.log";
+  "auth-svc.log"; "cron-processor.log"; "syslog.log"
+]
 
-  Printf.printf "Live mode: appending requests every %dms (Ctrl-C to stop)\n%!" interval_ms;
+(* Rotate all log files: active -> .1, .1 -> .2.gz, .2.gz -> .3.gz, etc.
+   keep_rotations controls how many generations to keep. *)
+let rotate_logs ~dir ~keep =
+  List.iter (fun name ->
+    let base = Filename.concat dir name in
+    (* Delete the oldest *)
+    let oldest_gz = Printf.sprintf "%s.%d.gz" base keep in
+    (try Sys.remove oldest_gz with Sys_error _ -> ());
+    (* Shift .N.gz -> .(N+1).gz for N = keep-1 downto 2 *)
+    for i = keep - 1 downto 2 do
+      let src = Printf.sprintf "%s.%d.gz" base i in
+      let dst = Printf.sprintf "%s.%d.gz" base (i + 1) in
+      (try Sys.rename src dst with Sys_error _ -> ())
+    done;
+    (* .1 -> .2.gz (compress) *)
+    let f1 = base ^ ".1" in
+    if Sys.file_exists f1 then begin
+      let f2gz = Printf.sprintf "%s.2.gz" base in
+      ignore (Sys.command (Printf.sprintf "gzip -c '%s' > '%s' && rm '%s'" f1 f2gz f1))
+    end;
+    (* active -> .1 (rename) *)
+    if Sys.file_exists base then
+      Sys.rename base (base ^ ".1");
+    (* Create fresh empty active file *)
+    let oc = open_out base in
+    close_out oc
+  ) log_names
+
+let live_append ~dir ~interval_ms ~rotate_sec ~keep_rotations =
+  let open_all () =
+    let oc name = open_out_gen [Open_append; Open_creat] 0o644
+      (Filename.concat dir name) in
+    (oc "nginx-access.log", oc "api-gateway.log", oc "worker-svc.log",
+     oc "auth-svc.log", oc "cron-processor.log", oc "syslog.log")
+  in
+  let close_all (a, b, c, d, e, f) =
+    List.iter close_out [a; b; c; d; e; f] in
+  let flush_all (a, b, c, d, e, f) =
+    List.iter (fun oc -> Printf.fprintf oc "%!") [a; b; c; d; e; f] in
+
+  Printf.printf "Live mode: %dms interval, rotate every %ds, keep %d\n%!"
+    interval_ms rotate_sec keep_rotations;
 
   let running = ref true in
   Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ -> running := false));
 
-  let flush_oc oc = Printf.fprintf oc "%!" in
+  let files = ref (open_all ()) in
+  let last_rotate = ref (Unix.gettimeofday ()) in
 
   while !running do
     let t = Unix.gettimeofday () in
+    let (nginx_oc, gateway_oc, worker_oc, auth_oc, cron_oc, syslog_oc) = !files in
     write_request_logs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
       ~syslog_oc ~base_time:t;
-    List.iter flush_oc [nginx_oc; gateway_oc; worker_oc; auth_oc; cron_oc; syslog_oc];
+    flush_all !files;
+
+    (* Check if it's time to rotate *)
+    if t -. !last_rotate >= float_of_int rotate_sec then begin
+      Printf.eprintf "[%s] Rotating logs (keep %d)...\n%!"
+        (let tm = Unix.gmtime t in
+         Printf.sprintf "%02d:%02d:%02d" tm.Unix.tm_hour tm.Unix.tm_min tm.Unix.tm_sec)
+        keep_rotations;
+      flush_due_jobs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
+        ~syslog_oc ~now:Float.infinity;
+      close_all !files;
+      rotate_logs ~dir ~keep:keep_rotations;
+      files := open_all ();
+      last_rotate := t
+    end;
+
     Unix.sleepf (float_of_int interval_ms /. 1000.0)
   done;
 
-  (* Flush remaining delayed jobs *)
+  let (nginx_oc, gateway_oc, worker_oc, auth_oc, cron_oc, syslog_oc) = !files in
   flush_due_jobs ~nginx_oc ~gateway_oc ~worker_oc ~auth_oc ~cron_oc
     ~syslog_oc ~now:Float.infinity;
-  List.iter close_out [nginx_oc; gateway_oc; worker_oc; auth_oc; cron_oc; syslog_oc];
+  close_all !files;
   Printf.printf "\nStopped.\n"
 
 let () =
@@ -702,6 +755,8 @@ let () =
   let rotations = ref 0 in
   let live = ref false in
   let live_interval = ref 300 in
+  let rotate_sec = ref 0 in
+  let keep_rotations = ref 5 in
   let args = Array.to_list Sys.argv |> List.tl in
   let rec parse = function
     | [] -> ()
@@ -710,6 +765,8 @@ let () =
     | "--rotations" :: n :: rest -> rotations := int_of_string n; parse rest
     | "--live" :: rest -> live := true; parse rest
     | "--interval" :: n :: rest -> live_interval := int_of_string n; parse rest
+    | "--rotate-sec" :: n :: rest -> rotate_sec := int_of_string n; parse rest
+    | "--keep" :: n :: rest -> keep_rotations := int_of_string n; parse rest
     | "--help" :: _ | "-h" :: _ ->
       Printf.printf "gen_logs — simulate microservice log traffic for weft testing\n\n";
       Printf.printf "Architecture: client -> nginx -> api-gateway -> worker-svc/auth-svc\n";
@@ -721,6 +778,8 @@ let () =
       Printf.printf "  --rotations <n>    Rotated archive generations (default: 0)\n";
       Printf.printf "  --live             Keep generating after initial batch\n";
       Printf.printf "  --interval <ms>    Live mode interval (default: 300ms)\n";
+      Printf.printf "  --rotate-sec <n>   Rotate logs every N seconds in live mode (0=off)\n";
+      Printf.printf "  --keep <n>         Keep N rotated generations (default: 5)\n";
       Printf.printf "  -h, --help         Show this help\n";
       exit 0
     | x :: _ ->
@@ -742,3 +801,4 @@ let () =
 
   if !live then
     live_append ~dir:!dir ~interval_ms:!live_interval
+      ~rotate_sec:!rotate_sec ~keep_rotations:!keep_rotations
