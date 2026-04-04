@@ -146,9 +146,12 @@ let discover_and_cache_local_archives adapter cache =
     let archives = Weft_source.Archive.discover_local ~path
       |> Weft_source.Archive.sort_by_mtime in
     if archives <> [] then begin
+      let total = List.length archives in
       Weft_cache.update_archives cache ~source_name:adapter.name archives;
-      List.iter (fun (archive : archive_info) ->
+      List.iteri (fun i (archive : archive_info) ->
         let origin = Filename.basename archive.remote_path in
+        report_status (Printf.sprintf "Caching %s/%s [%d/%d]"
+          adapter.name origin (i + 1) total);
         let already = match Weft_cache.get_manifest cache adapter.name with
           | None -> false
           | Some m -> List.exists (fun (s : segment) -> s.origin = origin) m.segments
@@ -180,9 +183,12 @@ let discover_and_cache_remote_archives adapter cache ssh =
   | Some path ->
     let archives = discover_remote_archives ssh path in
     if archives <> [] then begin
+      let total = List.length archives in
       Weft_cache.update_archives cache ~source_name:adapter.name archives;
-      List.iter (fun (archive : archive_info) ->
+      List.iteri (fun i (archive : archive_info) ->
         let origin = Filename.basename archive.remote_path in
+        report_status (Printf.sprintf "Fetching %s/%s [%d/%d]"
+          adapter.name origin (i + 1) total);
         let already = match Weft_cache.get_manifest cache adapter.name with
           | None -> false
           | Some m -> List.exists (fun (s : segment) -> s.origin = origin) m.segments
@@ -211,20 +217,39 @@ let ensure_cached ?t_opt ?time_range adapter cache =
       discover_and_cache_local_archives adapter cache
 
     | Remote ->
-      (match adapter.ssh, adapter.config.path with
-       | Some ssh, Some path ->
-         report_status (Printf.sprintf "Fetching %s from %s..."
-           path (Option.value ~default:"remote" adapter.config.transport));
-         (match fetch_remote_file ssh path with
-          | Some data ->
-            cache_string_data cache ~source_name:adapter.name
-              ~origin:(Filename.basename path) data
-          | None -> ());
-         (* Only fetch archives needed for the requested range *)
-         (match time_range with
-          | Some tr ->
-            let needed = Weft_cache.archives_needed_for_range cache
-              ~source_name:adapter.name ~time_range:tr in
+      (* Resolve glob to file list if needed *)
+      let remote_paths = match adapter.ssh, adapter.config.glob, adapter.config.path with
+        | Some ssh, Some glob, _ ->
+          (* Remote glob: expand via ssh ls *)
+          report_status (Printf.sprintf "Expanding glob %s..." glob);
+          (try
+             let lines = Weft_connection.Ssh_control.run_command_lines ssh
+               ["ls"; "-1"; glob] in
+             List.filter (fun s -> String.length s > 0) lines
+           with Failure _ -> [])
+        | _, _, Some path -> [path]
+        | _ -> []
+      in
+      (match adapter.ssh with
+       | Some ssh ->
+         List.iter (fun path ->
+           let origin = Filename.basename path in
+           let sub_name = if List.length remote_paths > 1 then
+             Printf.sprintf "%s:%s" adapter.name origin
+           else adapter.name in
+           report_status (Printf.sprintf "Fetching %s from %s..."
+             path (Option.value ~default:"remote" adapter.config.transport));
+           ignore sub_name; (* used for multi-file glob naming *)
+           (match fetch_remote_file ssh path with
+            | Some data ->
+              cache_string_data cache ~source_name:adapter.name
+                ~origin data
+            | None -> ());
+           (* Only fetch archives needed for the requested range *)
+           (match time_range with
+            | Some tr ->
+              let needed = Weft_cache.archives_needed_for_range cache
+                ~source_name:adapter.name ~time_range:tr in
             if needed <> [] then begin
               report_status (Printf.sprintf "Fetching %d archives for gap..."
                 (List.length needed));
@@ -236,9 +261,10 @@ let ensure_cached ?t_opt ?time_range adapter cache =
                 | None -> ()
               ) needed
             end
-          | None ->
-            discover_and_cache_remote_archives adapter cache ssh)
-       | _ ->
+            | None ->
+              discover_and_cache_remote_archives adapter cache ssh)
+         ) remote_paths
+       | None ->
          Printf.eprintf "Warning: remote source %s has no SSH connection\n"
            adapter.name)
 
