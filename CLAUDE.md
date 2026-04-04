@@ -21,44 +21,68 @@ Please use CLAUDE.md to store relevent facts.
 - **Language**: OCaml 5.2.1 (opam switch: `weft`)
 - **Build**: `dune build` / `dune runtest` (45 tests)
 - **TUI**: Notty directly (not Minttea — Riot incompatible with OCaml 5.2+)
-- **Concurrency**: Eio (structured concurrency, fiber-per-source)
+- **Concurrency**: Eio fibers (search fiber + per-source tail fibers + TUI fiber)
 - **Config**: TOML via otoml (formats.toml + sources.toml)
 - **Tests**: Alcotest — 7 test executables, 45 tests total
-- **Key libs**: eio, notty, otoml, ptime, re, yojson, cohttp-eio, digestif, camlzip, inotify, base64
-- **Re.Pcre note**: Named groups use `(?<name>...)` syntax, NOT `(?P<name>...)`
-- **Notty note**: Tab key is `` `Tab `` variant, not `` `ASCII '\t' ``
-- **Notty note**: `Term.pending` only checks internal buffer; use `Unix.select` on `Term.fds` for input polling
-- **Notty note**: `I.string` rejects control chars (newlines, tabs); sanitize before rendering
-- **Eio note**: `Unix.sleepf` blocks the scheduler; use `Eio.Time.sleep` or `Eio.Fiber.yield`
-- **Eio note**: Optional params — pass value directly, not wrapped in `Some`
+
+## Key Libraries
+
+eio, eio.unix, notty, notty.unix, otoml, ptime, re, yojson, cohttp-eio,
+digestif, camlzip, inotify, base64, http, uri
+
+## Important Gotchas
+
+- **Re.Pcre**: Named groups use `(?<name>...)` NOT `(?P<name>...)`
+- **Notty**: Tab key is `` `Tab `` variant, not `` `ASCII '\t' ``
+- **Notty**: `Term.pending` only checks internal buffer; use `Eio_unix.await_readable` on `Term.fds`
+- **Notty**: `I.string` rejects control chars (newlines, tabs); sanitize before rendering
+- **Eio**: `Unix.select` blocks the scheduler; use `Eio_unix.await_readable` or pluggable wait
+- **Eio**: `Unix.sleepf` blocks the scheduler; use `Eio.Time.sleep`
+- **Eio**: Optional params — pass value directly, not wrapped in `Some`
+- **Eio**: `Eio.Switch.fail sw Exit` needs `try ... with Exit` to catch
 - **Error handling**: Never use `with _ ->`. Always catch specific exceptions.
+- **Field name collisions**: `log_entry.timestamp` vs `format_config.timestamp` — use type annotations
+- **Ptime.Span.of_int_s**: Doesn't accept negative values; use `sub_span` for going backward
 
 ## CLI Modes
 
 ```
-weft                              # TUI mode
-weft --dump -s ERROR --limit 10   # One-shot search
-weft --live -s ERROR              # Tail mode (Ctrl-C to stop)
-weft --json -s ERROR              # JSON output (implies --dump)
-weft --dump --since 1h            # Last hour
-weft --dump --since 12:00 --until 13:00  # Specific window
+weft                                    # TUI (default to last 1h, live tail)
+weft --dump -s ERROR --limit 10         # One-shot search
+weft --live -s ERROR                    # CLI tail mode (Ctrl-C to stop)
+weft --json -s ERROR                    # JSON output (implies --dump)
+weft --dump --since 1h                  # Last hour
+weft --dump --since 12:00 --until 13:00 # Specific window
+```
+
+## TUI Keys
+
+```
+j/k  Up/Down      Scroll            /     Add search term
+PgUp/PgDn         Page              d     Delete term
+g/Home G/End      Top/bottom        s     Toggle source
+Tab               Cycle focus       t     Toggle term
+Enter             Detail pane       i/I   Isolate/restore terms
+o                 Sort order        </> -/+ r  Time range
+?                 Help              H     Heatmap
+q                 Quit
 ```
 
 ## Source Types
 
-- `type = "file"` — local file, inotify tail, local archive discovery
+- `type = "file"` — local file, inotify tail, rotation with archive re-discovery
 - `type = "directory"` — glob expansion to sub-sources
-- `type = "remote"` — SSH fetch/tail via ControlMaster, remote archive discovery
-- `type = "loki"` — HTTP query_range API, label selectors, cached locally
+- `type = "remote"` — SSH fetch/tail, ControlMaster, stderr rotation detection
+- `type = "loki"` — HTTP query_range API, 5s poll tail, label selectors
 
 ## Test Data Generator
 
 ```
-weft-gen-logs --dir /tmp/weft-test --count 5000 --rotations 2
-weft-gen-logs --dir /tmp/weft-test --live --interval 300
+weft-gen-logs --dir /tmp/test --count 5000 --rotations 2
+weft-gen-logs --dir /tmp/test --live --interval 200 --rotate-sec 60 --keep 5
 ```
 
-Simulates: nginx → api-gateway → worker-svc + auth-svc + cron-processor
+Simulates: nginx -> api-gateway -> worker-svc + auth-svc + cron-processor
 Trace IDs thread through all services. Cron jobs fire 30-120s after requests.
 
 ## Remote Test Host
