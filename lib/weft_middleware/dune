@@ -1,0 +1,4 @@
+(library
+ (name weft_middleware)
+ (public_name weft.middleware)
+ (libraries weft_types weft_time re yojson ptime.clock.os))

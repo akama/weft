@@ -1,0 +1,4 @@
+(library
+ (name weft_config)
+ (public_name weft.config)
+ (libraries weft_types otoml re))

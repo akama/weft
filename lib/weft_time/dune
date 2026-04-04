@@ -1,0 +1,4 @@
+(library
+ (name weft_time)
+ (public_name weft.time)
+ (libraries weft_types ptime ptime.clock.os re yojson))

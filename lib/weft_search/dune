@@ -1,0 +1,5 @@
+(library
+ (name weft_search)
+ (public_name weft.search)
+ (libraries weft_types weft_source weft_cache weft_middleware
+            weft_merge weft_config eio re ptime.clock.os))

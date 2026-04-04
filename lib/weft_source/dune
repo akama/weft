@@ -1,0 +1,6 @@
+(library
+ (name weft_source)
+ (public_name weft.source)
+ (libraries weft_types weft_config weft_connection weft_cache
+            weft_middleware weft_time eio cohttp-eio yojson re
+            ptime.clock.os uri))

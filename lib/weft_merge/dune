@@ -1,0 +1,4 @@
+(library
+ (name weft_merge)
+ (public_name weft.merge)
+ (libraries weft_types ptime ptime.clock.os eio digestif))
