@@ -162,7 +162,8 @@ let make_loki_query (net : _ Eio.Net.t) : Weft_search.loki_query_fn =
       None
 
 (* Run the full engine with TUI *)
-let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
+let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
+    ~(time_range : Weft_types.time_range option) =
   let fs = Eio.Stdenv.fs env in
   let proc = Eio.Stdenv.process_mgr env in
   let cache = Weft_cache.create ~fs sources_config.cache in
@@ -203,7 +204,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
   let source_count = List.length source_adapters in
 
   (* Create TUI model before starting fibers so we can show initial state *)
-  let model = Weft_tui.create ~search in
+  let model = Weft_tui.create ~search ~time_range in
 
   let update_source_statuses () =
     let statuses = List.map (fun (src : source_config) ->
@@ -354,16 +355,27 @@ let init_runtime ~env ~formats_config ~sources_config ~initial_terms =
 
 (* Run in dump mode *)
 let run_dump ~env ~formats_config ~sources_config ~initial_terms
-    ~limit ~json =
+    ~limit ~json ~(time_range : Weft_types.time_range option) =
   let (cache, pool, search) =
     init_runtime ~env ~formats_config ~sources_config ~initial_terms in
   ignore pool;
 
   let has_terms = initial_terms <> [] in
-  let entries = if has_terms then
-    Weft_search.search search ~time_range:None
+  let all_entries = if has_terms then
+    Weft_search.search search ~time_range
   else
     Weft_search.load_all search
+  in
+  (* Apply time range filter for load_all *)
+  let entries = match time_range, has_terms with
+    | Some tr, false ->
+      Seq.filter (fun (entry : Weft_types.log_entry) ->
+        Ptime.is_later entry.timestamp ~than:tr.start_ &&
+        (match tr.end_ with
+         | None -> true
+         | Some end_t -> Ptime.is_earlier entry.timestamp ~than:end_t)
+      ) all_entries
+    | _ -> all_entries
   in
   let count = ref 0 in
   let rec print_seq seq =

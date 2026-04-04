@@ -20,7 +20,75 @@ type cli_args = {
   mode : mode;
   dump_limit : int;
   dump_json : bool;
+  since : string option;
+  until : string option;
 }
+
+(* Parse a time spec: "1h", "30m", "2h30m", ISO8601, or HH:MM *)
+let parse_time_spec s =
+  (* Try relative: "1h", "30m", "2h30m", "90s" *)
+  let try_relative () =
+    let re = Re.compile (Re.Pcre.re {|^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$|}) in
+    match Re.exec_opt re s with
+    | Some g ->
+      let h = try int_of_string (Re.Group.get g 1) with Not_found -> 0 in
+      let m = try int_of_string (Re.Group.get g 2) with Not_found -> 0 in
+      let sec = try int_of_string (Re.Group.get g 3) with Not_found -> 0 in
+      let total = h * 3600 + m * 60 + sec in
+      if total > 0 then
+        let now = Ptime_clock.now () in
+        Ptime.sub_span now (Ptime.Span.of_int_s total)
+      else None
+    | None -> None
+  in
+  (* Try HH:MM or HH:MM:SS (today) *)
+  let try_time_only () =
+    let re = Re.compile (Re.Pcre.re {|^(\d{1,2}):(\d{2})(?::(\d{2}))?$|}) in
+    match Re.exec_opt re s with
+    | Some g ->
+      let hh = int_of_string (Re.Group.get g 1) in
+      let mm = int_of_string (Re.Group.get g 2) in
+      let ss = try int_of_string (Re.Group.get g 3) with Not_found -> 0 in
+      let now = Ptime_clock.now () in
+      let ((y, mo, d), _) = Ptime.to_date_time now in
+      Ptime.of_date_time ((y, mo, d), ((hh, mm, ss), 0))
+    | None -> None
+  in
+  (* Try ISO8601 *)
+  let try_iso () = Weft_time.parse_iso8601 s in
+  (* Try in order *)
+  match try_relative () with
+  | Some t -> Some t
+  | None ->
+    match try_time_only () with
+    | Some t -> Some t
+    | None -> try_iso ()
+
+let build_time_range ~since ~until =
+  let start_ = match since with
+    | None -> None
+    | Some s ->
+      match parse_time_spec s with
+      | Some t -> Some t
+      | None ->
+        Printf.eprintf "Warning: could not parse --since '%s'\n" s;
+        None
+  in
+  let end_ = match until with
+    | None -> None
+    | Some s ->
+      match parse_time_spec s with
+      | Some t -> Some t
+      | None ->
+        Printf.eprintf "Warning: could not parse --until '%s'\n" s;
+        None
+  in
+  match start_, end_ with
+  | Some s, e -> Some { start_ = s; end_ = e }
+  | None, Some e ->
+    (* --until without --since: from epoch to until *)
+    Some { start_ = Ptime.epoch; end_ = Some e }
+  | None, None -> None
 
 let parse_cli () =
   let args = ref {
@@ -30,6 +98,8 @@ let parse_cli () =
     mode = Tui;
     dump_limit = 0;
     dump_json = false;
+    since = None;
+    until = None;
   } in
   let argv = Array.to_list Sys.argv |> List.tl in
   let rec parse = function
@@ -48,6 +118,10 @@ let parse_cli () =
       args := { !args with dump_limit = int_of_string n }; parse rest
     | "--json" :: rest ->
       args := { !args with dump_json = true; mode = Dump }; parse rest
+    | "--since" :: t :: rest ->
+      args := { !args with since = Some t }; parse rest
+    | "--until" :: t :: rest ->
+      args := { !args with until = Some t }; parse rest
     | "--help" :: _ | "-h" :: _ ->
       Printf.printf "weft — unified log search TUI\n\n";
       Printf.printf "Usage: weft [OPTIONS]\n\n";
@@ -56,6 +130,10 @@ let parse_cli () =
       Printf.printf "  --dump               One-shot: print matching entries and exit\n";
       Printf.printf "  --live, -f           Print entries then tail for new ones (Ctrl-C to stop)\n";
       Printf.printf "  --json               Dump as JSON lines (implies --dump)\n\n";
+      Printf.printf "Time range:\n";
+      Printf.printf "  --since <spec>       Start of time range\n";
+      Printf.printf "  --until <spec>       End of time range\n";
+      Printf.printf "  Time specs: 1h, 30m, 2h30m, 10:30, 10:30:00, 2026-04-04T10:30:00Z\n\n";
       Printf.printf "Options:\n";
       Printf.printf "  --formats <path>     Path to formats.toml\n";
       Printf.printf "  --sources <path>     Path to sources.toml\n";
@@ -101,14 +179,15 @@ let load_config cli =
 let run env =
   let cli = parse_cli () in
   let (formats_config, sources_config) = load_config cli in
+  let time_range = build_time_range ~since:cli.since ~until:cli.until in
   match cli.mode with
   | Dump ->
     Engine.run_dump ~env ~formats_config ~sources_config
       ~initial_terms:cli.initial_terms
-      ~limit:cli.dump_limit ~json:cli.dump_json
+      ~limit:cli.dump_limit ~json:cli.dump_json ~time_range
   | Live ->
     Engine.run_live ~env ~formats_config ~sources_config
       ~initial_terms:cli.initial_terms ~json:cli.dump_json
   | Tui ->
     Engine.run_with_tui ~env ~formats_config ~sources_config
-      ~initial_terms:cli.initial_terms
+      ~initial_terms:cli.initial_terms ~time_range
