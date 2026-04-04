@@ -48,7 +48,7 @@ let update_manifest t source_name manifest =
 let new_segment t ~source_name ~origin =
   let dir = ensure_dir t source_name in
   let seg = Segment.create ~origin
-    ~local_path:(Filename.concat source_name (Segment.generate_id ()))
+    ~local_path:(Segment.generate_id ())
     ~ttl_hours:t.config.default_ttl_hours in
   match get_manifest t source_name with
   | None -> seg
@@ -119,6 +119,81 @@ let update_archives t ~source_name archives =
   | None -> ()
   | Some manifest ->
     update_manifest t source_name { manifest with known_archives = archives }
+
+let cache_file t ~source_name ~origin ~path =
+  let _dir = ensure_dir t source_name in
+  let seg = Segment.create ~origin
+    ~local_path:(Segment.generate_id ())
+    ~ttl_hours:t.config.default_ttl_hours in
+  (* Read the source file and write it to the segment *)
+  let data = try
+    let ic = open_in path in
+    let len = in_channel_length ic in
+    let buf = Bytes.create len in
+    really_input ic buf 0 len;
+    close_in ic;
+    Bytes.to_string buf
+  with _ -> ""
+  in
+  if data = "" then None
+  else begin
+    let seg_path = Eio.Path.(t.fs / t.base_dir / source_name / seg.local_path) in
+    (try Eio.Path.save ~create:(`Or_truncate 0o644) seg_path data
+     with _ -> ());
+    let size = Int64.of_int (String.length data) in
+    let seg = { seg with size_bytes = size } in
+    (* Determine time range from first/last lines *)
+    let lines = String.split_on_char '\n' data
+      |> List.filter (fun s -> String.length s > 0) in
+    let first_ts = match lines with
+      | first :: _ -> Weft_time.auto_detect first
+      | [] -> None
+    in
+    let last_ts = match List.rev lines with
+      | last :: _ -> Weft_time.auto_detect last
+      | [] -> None
+    in
+    let start_ = Option.value ~default:(Ptime_clock.now ()) first_ts in
+    let seg = { seg with
+      time_range = { start_; end_ = last_ts };
+    } in
+    (match get_manifest t source_name with
+     | None -> ()
+     | Some manifest ->
+       let manifest = { manifest with segments = manifest.segments @ [seg] } in
+       update_manifest t source_name manifest);
+    Some seg
+  end
+
+let is_cached t ~source_name =
+  match get_manifest t source_name with
+  | None -> false
+  | Some m -> m.segments <> []
+
+let cache_stats t =
+  let total_size = List.fold_left (fun acc (_, (m : cache_manifest)) ->
+    let source_size = List.fold_left (fun a (s : segment) ->
+      Int64.add a s.size_bytes
+    ) 0L m.segments in
+    Int64.add acc source_size
+  ) 0L t.manifests in
+  let total_segments = List.fold_left (fun acc (_, (m : cache_manifest)) ->
+    acc + List.length m.segments
+  ) 0 t.manifests in
+  let time_range =
+    let all_starts = List.filter_map (fun (_, (m : cache_manifest)) ->
+      List.filter_map (fun (s : segment) -> Some s.time_range.start_) m.segments
+      |> List.sort Ptime.compare |> (function [] -> None | h :: _ -> Some h)
+    ) t.manifests in
+    let all_ends = List.filter_map (fun (_, (m : cache_manifest)) ->
+      List.filter_map (fun (s : segment) -> s.time_range.end_) m.segments
+      |> List.sort (fun a b -> Ptime.compare b a) |> (function [] -> None | h :: _ -> Some h)
+    ) t.manifests in
+    let earliest = all_starts |> List.sort Ptime.compare |> (function [] -> None | h :: _ -> Some h) in
+    let latest = all_ends |> List.sort (fun a b -> Ptime.compare b a) |> (function [] -> None | h :: _ -> Some h) in
+    (earliest, latest)
+  in
+  (total_size, total_segments, time_range)
 
 let run_eviction t source_name =
   match get_manifest t source_name with

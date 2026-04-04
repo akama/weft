@@ -74,17 +74,23 @@ let process_through_pipeline pipeline ~source lines =
   | Some pl ->
     Weft_middleware.Pipeline.process_lines pl ~source lines
 
-(* Read lines for a source — from file, cache, or grep *)
+(* Read lines for a source — check cache first, populate if needed *)
 let read_source_lines adapter cache =
-  (* Try reading from the file directly first *)
-  let from_file = match adapter.config.path with
-    | Some path when Sys.file_exists path -> read_file_lines path
-    | _ -> []
-  in
-  if from_file <> [] then from_file
-  else
-    (* Fall back to cache *)
+  (* Check cache first *)
+  if Weft_cache.is_cached cache ~source_name:adapter.name then
     Weft_cache.read_cached_lines cache ~source_name:adapter.name
+  else begin
+    (* Not cached — read from file and populate cache *)
+    match adapter.config.path with
+    | Some path when Sys.file_exists path ->
+      ignore (Weft_cache.cache_file cache
+        ~source_name:adapter.name
+        ~origin:(Filename.basename path)
+        ~path);
+      (* Now read back from cache *)
+      Weft_cache.read_cached_lines cache ~source_name:adapter.name
+    | _ -> []
+  end
 
 (* Batch search for a single source — reads file, runs pipeline, filters *)
 let search_source t adapter ~terms ~time_range =

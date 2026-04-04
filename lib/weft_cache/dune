@@ -1,4 +1,4 @@
 (library
  (name weft_cache)
  (public_name weft.cache)
- (libraries weft_types yojson digestif eio camlzip ptime.clock.os))
+ (libraries weft_types weft_time yojson digestif eio camlzip ptime.clock.os))
