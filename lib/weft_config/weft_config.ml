@@ -4,7 +4,7 @@ let get_string_opt tbl key =
   match Otoml.find_opt tbl (Otoml.get_string) [key] with
   | Some s -> Some s
   | None -> None
-  | exception _ -> None
+  | exception (Otoml.Type_error _) -> None
 
 let get_string tbl key ~default =
   Option.value ~default (get_string_opt tbl key)
@@ -13,13 +13,13 @@ let get_int tbl key ~default =
   match Otoml.find_opt tbl (Otoml.get_integer) [key] with
   | Some n -> n
   | None -> default
-  | exception _ -> default
+  | exception (Otoml.Type_error _) -> default
 
 let get_string_list tbl key =
   match Otoml.find_opt tbl (Otoml.get_array (Otoml.get_string)) [key] with
   | Some l -> l
   | None -> []
-  | exception _ -> []
+  | exception (Otoml.Type_error _) -> []
 
 let parse_rotation_style = function
   | "rename" -> Rename

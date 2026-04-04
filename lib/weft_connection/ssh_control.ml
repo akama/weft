@@ -36,12 +36,15 @@ let establish (proc : _ Eio.Process.mgr) t =
   let run = make_runner proc in
   t.run <- Some run;
   (* Ensure socket directory exists *)
-  (try ignore (run ["mkdir"; "-p"; socket_dir]) with _ -> ());
+  (try ignore (run ["mkdir"; "-p"; socket_dir])
+   with Eio.Io _ as e ->
+     Printf.eprintf "Warning: could not create socket dir: %s\n"
+       (Printexc.to_string e));
   let (base, args) = parse_transport t.transport_cmd in
   let is_tsh = base = "tsh" in
   if is_tsh then begin
     (try ignore (run ["tsh"; "status"])
-     with _ ->
+     with Eio.Io _ ->
        failwith "Teleport session not active. Run 'tsh login' first.")
   end;
   let ssh_cmd = if is_tsh then begin
@@ -92,7 +95,9 @@ let close t =
     if base <> "tsh" then begin
       (try
          ignore (run_command t ["-O"; "exit"])
-       with _ -> ())
+       with Eio.Io _ | Failure _ ->
+         (* Best-effort cleanup — socket may already be gone *)
+         ())
     end;
     t.active <- false
   end

@@ -38,10 +38,8 @@ let create ~cache ~sources ~formats ~general =
 (* Tag entries with which search terms they match *)
 let tag_terms terms (entry : log_entry) =
   let matched = List.filter (fun term ->
-    try
-      let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
-      Re.execp re entry.raw
-    with _ -> false
+    let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
+    Re.execp re entry.raw
   ) terms in
   { entry with terms = matched }
 
@@ -55,7 +53,9 @@ let read_file_lines path =
      done with End_of_file -> ());
     close_in ic;
     List.rev !lines
-  with _ -> []
+  with Sys_error msg ->
+    Printf.eprintf "Warning: could not read %s: %s\n" path msg;
+    []
 
 (* Process raw lines through a pipeline *)
 let process_through_pipeline pipeline ~source lines =
@@ -111,7 +111,10 @@ let discover_and_cache_archives adapter cache =
                   ~origin:archive_origin
                   ~path:tmp)
               end;
-              (try Sys.remove tmp with _ -> ())
+              (try Sys.remove tmp
+               with Sys_error msg ->
+                 Printf.eprintf "Warning: could not remove temp file %s: %s\n"
+                   tmp msg)
             | None -> ()
           end else begin
             (* Uncompressed archive — cache directly *)

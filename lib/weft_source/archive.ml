@@ -31,7 +31,10 @@ let discover_local ~path =
      done with End_of_file -> ());
     ignore (Unix.close_process_in ic);
     List.rev !lines
-  with _ -> []
+  with Unix.Unix_error (err, _, _) ->
+    Printf.eprintf "Warning: archive discovery failed for %s: %s\n"
+      pattern (Unix.error_message err);
+    []
   in
   (* Filter out the active log file itself *)
   List.filter_map (fun filepath ->
@@ -42,7 +45,7 @@ let discover_local ~path =
       let stat = try
         let s = Unix.stat filepath in
         Some s
-      with _ -> None
+      with Unix.Unix_error _ -> None
       in
       let mtime = match stat with
         | Some s -> Ptime.of_float_s s.Unix.st_mtime
@@ -78,7 +81,14 @@ let discover_remote ~ssh ~path =
         else None
       | _ -> None
     ) lines
-  with _ -> []
+  with
+  | Failure msg ->
+    Printf.eprintf "Warning: remote archive discovery failed for %s: %s\n" path msg;
+    []
+  | Eio.Io _ as e ->
+    Printf.eprintf "Warning: remote archive discovery I/O error for %s: %s\n"
+      path (Printexc.to_string e);
+    []
 
 (* Sort archives by mtime, most recent first *)
 let sort_by_mtime archives =

@@ -51,7 +51,7 @@ let parse_loki_timestamp ns_str =
     let ns = Int64.of_string ns_str in
     let secs = Int64.to_float (Int64.div ns 1_000_000_000L) in
     Ptime.of_float_s secs
-  with _ -> None
+  with Failure _ -> None
 
 let search t ~terms ~time_range =
   let logql = build_logql ~labels:t.default_labels ~terms in
@@ -105,7 +105,11 @@ let parse_query_response ~source json =
       ) values
     ) result in
     entries
-  with _ -> []
+  with
+  | Yojson.Basic.Util.Type_error (msg, _) ->
+    Printf.eprintf "Warning: Loki response parse error: %s\n" msg; []
+  | Yojson.Json_error msg ->
+    Printf.eprintf "Warning: Loki JSON error: %s\n" msg; []
 
 (* Tail via WebSocket — stub for now *)
 let tail _t ~terms:_ ~emit:_ ~cancel:_ =

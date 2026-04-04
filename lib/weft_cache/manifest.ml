@@ -60,7 +60,11 @@ let segment_of_json (json : Yojson.Basic.t) : segment option =
       sealed; content_hash; size_bytes; fetched_at;
       ttl_hours; joined_index_built;
     }
-  with _ -> None
+  with
+  | Yojson.Basic.Util.Type_error (msg, _) ->
+    Printf.eprintf "Warning: malformed segment JSON: %s\n" msg; None
+  | Failure msg ->
+    Printf.eprintf "Warning: segment parse error: %s\n" msg; None
 
 let archive_to_json (a : archive_info) : Yojson.Basic.t =
   `Assoc [
@@ -86,7 +90,11 @@ let archive_of_json (json : Yojson.Basic.t) : archive_info option =
       | _ -> None
     in
     Some { remote_path; mtime; size_bytes; matches_segment }
-  with _ -> None
+  with
+  | Yojson.Basic.Util.Type_error (msg, _) ->
+    Printf.eprintf "Warning: malformed archive JSON: %s\n" msg; None
+  | Failure msg ->
+    Printf.eprintf "Warning: archive parse error: %s\n" msg; None
 
 let manifest_to_json (m : cache_manifest) : Yojson.Basic.t =
   `Assoc [
@@ -110,7 +118,11 @@ let manifest_of_json (json : Yojson.Basic.t) : cache_manifest option =
       |> List.filter_map archive_of_json
     in
     Some { source; format; segments; known_archives }
-  with _ -> None
+  with
+  | Yojson.Basic.Util.Type_error (msg, _) ->
+    Printf.eprintf "Warning: malformed manifest JSON: %s\n" msg; None
+  | Yojson.Json_error msg ->
+    Printf.eprintf "Warning: manifest JSON parse error: %s\n" msg; None
 
 let save_manifest ~fs ~dir (manifest : cache_manifest) =
   let path = Eio.Path.(fs / dir / "manifest.json") in
@@ -124,4 +136,12 @@ let load_manifest ~fs ~dir : cache_manifest option =
     let data = Eio.Path.load path in
     let json = Yojson.Basic.from_string data in
     manifest_of_json json
-  with _ -> None
+  with
+  | Eio.Io (Eio.Fs.E (Not_found _), _) -> None  (* fresh source, no manifest yet *)
+  | Eio.Io _ as e ->
+    Printf.eprintf "Warning: could not load manifest from %s: %s\n"
+      dir (Printexc.to_string e);
+    None
+  | Yojson.Json_error msg ->
+    Printf.eprintf "Warning: corrupt manifest in %s: %s\n" dir msg;
+    None

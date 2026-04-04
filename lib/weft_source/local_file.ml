@@ -73,10 +73,8 @@ let search t ~terms ~time_range:_ =
           | None -> line
         in
         let matched_terms = List.filter (fun term ->
-          try
-            let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
-            Re.execp re raw
-          with _ -> false
+          let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
+          Re.execp re raw
         ) terms in
         let entry = {
           timestamp = Ptime_clock.now ();
@@ -120,8 +118,7 @@ let tail t ~terms ~emit ~cancel =
               | None -> terms
               | Some _ ->
                 List.filter (fun term ->
-                  try Re.execp (Re.compile (Re.Pcre.re (Re.Pcre.quote term))) line
-                  with _ -> false
+                  Re.execp (Re.compile (Re.Pcre.re (Re.Pcre.quote term))) line
                 ) terms
             in
             emit {

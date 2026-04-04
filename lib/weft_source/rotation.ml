@@ -43,4 +43,4 @@ let check_local_rotation ~path ~last_inode ~last_size =
       Some (File_truncated, current_inode, current_size)
     else
       None
-  with _ -> None
+  with Unix.Unix_error _ -> None

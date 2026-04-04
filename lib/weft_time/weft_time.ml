@@ -28,10 +28,12 @@ let month_of_abbrev = function
   | _ -> None
 
 let int_of_group g i =
-  try int_of_string (Re.Group.get g i) with _ -> 0
+  try int_of_string (Re.Group.get g i)
+  with Not_found | Failure _ -> 0
 
 let opt_group g i =
-  try Some (Re.Group.get g i) with _ -> None
+  try Some (Re.Group.get g i)
+  with Not_found -> None
 
 let ptime_of_ymd_hms ~y ~m ~d ~hh ~mm ~ss =
   match Ptime.of_date_time ((y, m, d), ((hh, mm, ss), 0)) with
@@ -193,7 +195,7 @@ and parse_with_strptime fmt s =
       | 'M' -> mm := int_of_group g grp
       | 'S' -> ss := int_of_group g grp
       | 'b' ->
-        (match month_of_abbrev (try Re.Group.get g grp with _ -> "") with
+        (match month_of_abbrev (try Re.Group.get g grp with Not_found -> "") with
          | Some mo -> m := mo | None -> ())
       | _ -> ()
     ) specs;
@@ -222,7 +224,7 @@ let parser_of_strategy (strategy : timestamp_strategy) : string -> Ptime.t optio
        match Re.exec_opt re s with
        | None -> None
        | Some g ->
-         let captured = try Re.Group.get g 1 with _ -> s in
+         let captured = try Re.Group.get g 1 with Not_found -> s in
          parse_by_format_name format captured)
   | Json_field { field; format } ->
     (fun s ->
@@ -244,7 +246,7 @@ let parser_of_strategy (strategy : timestamp_strategy) : string -> Ptime.t optio
                | _ -> parse_by_format_name format (string_of_int i))
             | _ -> None)
          | _ -> None
-       with _ -> None)
+       with Yojson.Json_error _ | Not_found -> None)
 
 (* Cached auto-detection: try first N lines, remember which parser worked *)
 type cached_parser = {

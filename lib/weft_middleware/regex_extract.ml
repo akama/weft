@@ -21,7 +21,7 @@ let apply t s metadata =
     List.iteri (fun i name ->
       let grp = i + 1 in
       if grp < n then
-        match (try Some (Re.Group.get g grp) with _ -> None) with
+        match (try Some (Re.Group.get g grp) with Not_found -> None) with
         | Some v -> pairs := (name, v) :: !pairs
         | None -> ()
     ) fields;

@@ -26,13 +26,16 @@ let compute_hash (fs : Eio.Fs.dir_ty Eio.Path.t) path =
 let seal seg ~(fs : Eio.Fs.dir_ty Eio.Path.t) ~end_time =
   let content_hash =
     try Some (compute_hash fs seg.local_path)
-    with _ -> None
+    with Eio.Io _ as e ->
+      Printf.eprintf "Warning: could not hash segment %s: %s\n"
+        seg.local_path (Printexc.to_string e);
+      None
   in
   let size_bytes =
     try
       let stat = Eio.Path.stat ~follow:true Eio.Path.(fs / seg.local_path) in
       Int64.of_int (Optint.Int63.to_int stat.size)
-    with _ -> seg.size_bytes
+    with Eio.Io _ -> seg.size_bytes
   in
   { seg with
     sealed = true;
@@ -45,7 +48,7 @@ let append_data ~fs ~dir seg data =
   let path = Eio.Path.(fs / dir / seg.local_path) in
   let existing =
     try Eio.Path.load path
-    with _ -> ""
+    with Eio.Io (Eio.Fs.E (Not_found _), _) -> ""
   in
   Eio.Path.save ~create:(`Or_truncate 0o644) path (existing ^ data);
   let new_size = Int64.add seg.size_bytes (Int64.of_int (String.length data)) in
@@ -64,4 +67,7 @@ let read_lines ~fs ~dir seg =
     let data = Eio.Path.load path in
     String.split_on_char '\n' data
     |> List.filter (fun s -> String.length s > 0)
-  with _ -> []
+  with Eio.Io _ as e ->
+    Printf.eprintf "Warning: could not read segment %s: %s\n"
+      seg.local_path (Printexc.to_string e);
+    []

@@ -11,7 +11,7 @@ let expand_pattern pattern =
       let changed = ref false in
       let result = Re.replace grok_ref_re pat ~f:(fun g ->
         let pat_name = Re.Group.get g 1 in
-        let field_name = try Some (Re.Group.get g 2) with _ -> None in
+        let field_name = try Some (Re.Group.get g 2) with Not_found -> None in
         match Grok_patterns.lookup pat_name with
         | None -> Re.Group.get g 0 (* leave as-is if unknown *)
         | Some replacement ->
@@ -38,7 +38,7 @@ let create pattern =
   let field_names =
     Re.all name_re expanded
     |> List.filter_map (fun g ->
-      try Some (Re.Group.get g 1) with _ -> None)
+      try Some (Re.Group.get g 1) with Not_found -> None)
   in
   { re; field_names }
 
@@ -63,7 +63,7 @@ let apply t s metadata =
                if idx < List.length t.field_names &&
                   List.nth t.field_names idx = name then
                  found := Some (name, v)
-             with _ -> ())
+             with Not_found -> ())
         done;
         !found
       ) t.field_names

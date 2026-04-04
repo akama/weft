@@ -21,7 +21,9 @@ let ensure_dir t source_name =
   let dir = Filename.concat t.base_dir source_name in
   (try
      Eio.Path.mkdirs ~exists_ok:true ~perm:0o755 (Eio.Path.(t.fs / dir))
-   with _ -> ());
+   with Eio.Io _ as e ->
+     Printf.eprintf "Error: could not create cache dir %s: %s\n"
+       dir (Printexc.to_string e));
   dir
 
 let init_source t ~source_name ~format =
@@ -137,13 +139,17 @@ let cache_file t ~source_name ~origin ~path =
     really_input ic buf 0 len;
     close_in ic;
     Bytes.to_string buf
-  with _ -> ""
+  with
+  | Sys_error msg ->
+    Printf.eprintf "Error: could not read %s: %s\n" path msg; ""
   in
   if data = "" then None
   else begin
     let seg_path = Eio.Path.(t.fs / t.base_dir / source_name / seg.local_path) in
     (try Eio.Path.save ~create:(`Or_truncate 0o644) seg_path data
-     with _ -> ());
+     with Eio.Io _ as e ->
+       Printf.eprintf "Error: could not write cache segment %s: %s\n"
+         seg.local_path (Printexc.to_string e));
     let size = Int64.of_int (String.length data) in
     let seg = { seg with size_bytes = size } in
     (* Determine time range from first/last lines *)

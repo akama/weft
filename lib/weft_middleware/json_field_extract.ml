@@ -35,4 +35,4 @@ let apply t s metadata =
       in
       metadata @ new_fields
     | _ -> metadata
-  with _ -> metadata
+  with Yojson.Json_error _ -> metadata

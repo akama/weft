@@ -71,15 +71,21 @@ let search t ~terms ~time_range:_ =
           | None -> line
         in
         let matched_terms = List.filter (fun term ->
-          try
-            let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
-            Re.execp re raw
-          with _ -> false
+          let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
+          Re.execp re raw
         ) terms in
         { timestamp = Ptime_clock.now ();
           raw; source; terms = matched_terms; metadata = [] }
       ) lines)
-    with _ -> Seq.empty
+    with
+    | Failure msg ->
+      Printf.eprintf "Warning: remote search failed for %s: %s\n"
+        t.config.name msg;
+      Seq.empty
+    | Eio.Io _ as e ->
+      Printf.eprintf "Warning: remote search I/O error for %s: %s\n"
+        t.config.name (Printexc.to_string e);
+      Seq.empty
 
 let tail t ~terms ~emit ~cancel =
   let filter_pattern = if terms = [] then ""
@@ -106,8 +112,7 @@ let tail t ~terms ~emit ~cancel =
          in
          if matches then begin
            let matched_terms = List.filter (fun term ->
-             try Re.execp (Re.compile (Re.Pcre.re (Re.Pcre.quote term))) line
-             with _ -> false
+             Re.execp (Re.compile (Re.Pcre.re (Re.Pcre.quote term))) line
            ) terms in
            emit {
              timestamp = Ptime_clock.now ();
