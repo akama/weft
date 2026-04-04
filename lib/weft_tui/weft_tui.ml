@@ -59,6 +59,23 @@ let format_time_range = function
           (fmt_date sd) start_t (fmt_date ed) (time e)
 
 (* Re-run search and update timeline *)
+(* Run a search and update the timeline. Can be called from main thread
+   or from a background thread (results written via pending_results). *)
+let do_search model =
+  let terms = Weft_search.enabled_terms model.search in
+  let entries = if terms <> [] then
+    Weft_search.search model.search ~time_range:model.time_range
+  else
+    Weft_search.load_all ?time_range:model.time_range model.search
+  in
+  let entry_list = List.of_seq (Seq.take 100000 entries) in
+  let disabled = model.sidebar.disabled_sources in
+  let filtered = List.filter (fun (e : log_entry) ->
+    not (List.mem e.source disabled)
+  ) entry_list in
+  filtered
+
+(* Synchronous refresh — used for initial load *)
 let refresh_search model =
   let terms = Weft_search.enabled_terms model.search in
   let term_desc = match terms with
@@ -66,19 +83,23 @@ let refresh_search model =
     | [t] -> Printf.sprintf "'%s'" t
     | ts -> Printf.sprintf "%d terms" (List.length ts) in
   Status.set model.status (Printf.sprintf "Searching %s..." term_desc);
-  let entries = if terms <> [] then
-    Weft_search.search model.search ~time_range:model.time_range
-  else
-    Weft_search.load_all ?time_range:model.time_range model.search
-  in
-  let entry_list = List.of_seq (Seq.take 100000 entries) in
-  let filtered = List.filter (fun (e : log_entry) ->
-    Sidebar.is_source_enabled model.sidebar e.source
-  ) entry_list in
-  Timeline.set_entries model.timeline filtered;
+  let results = do_search model in
+  Timeline.set_entries model.timeline results;
   let range_desc = format_time_range model.time_range in
   Status.set model.status
-    (Printf.sprintf "%d entries [%s]" (List.length filtered) range_desc)
+    (Printf.sprintf "%d entries [%s]" (List.length results) range_desc)
+
+(* Request a background refresh — engine picks this up *)
+let needs_refresh = ref false
+
+let request_refresh model =
+  let terms = Weft_search.enabled_terms model.search in
+  let term_desc = match terms with
+    | [] -> "all entries"
+    | [t] -> Printf.sprintf "'%s'" t
+    | ts -> Printf.sprintf "%d terms" (List.length ts) in
+  Status.set model.status (Printf.sprintf "Searching %s..." term_desc);
+  needs_refresh := true
 
 (* Time range helpers *)
 let window_seconds tr =
@@ -155,13 +176,13 @@ let handle_key model key =
        in
        let half = window_seconds tr / 2 in
        model.time_range <- Some (shift_range tr (-half));
-       refresh_search model
+       request_refresh model
      | `ASCII '>' | `ASCII '.' when model.overlay = Heatmap ->
        (match model.time_range with
         | Some tr ->
           let half = window_seconds tr / 2 in
           model.time_range <- Some (shift_range tr half);
-          refresh_search model
+          request_refresh model
         | None -> ())
      | `ASCII '-' | `ASCII '_' when model.overlay = Heatmap ->
        (match model.time_range with
@@ -169,7 +190,7 @@ let handle_key model key =
           let narrowed = narrow_range tr in
           if window_seconds narrowed > 60 then begin
             model.time_range <- Some narrowed;
-            refresh_search model
+            request_refresh model
           end
         | None ->
           let now = Ptime_clock.now () in
@@ -177,16 +198,16 @@ let handle_key model key =
             start_ = (match Ptime.sub_span now (Ptime.Span.of_int_s 1800) with
                        | Some t -> t | None -> now);
             end_ = Some now };
-          refresh_search model)
+          request_refresh model)
      | `ASCII '+' | `ASCII '=' when model.overlay = Heatmap ->
        (match model.time_range with
         | Some tr ->
           model.time_range <- Some (widen_range tr);
-          refresh_search model
+          request_refresh model
         | None -> ())
      | `ASCII 'r' when model.overlay = Heatmap ->
        model.time_range <- None;
-       refresh_search model
+       request_refresh model
      | _ -> ())
   end else
   if Search_bar.is_active model.search_bar then begin
@@ -197,7 +218,7 @@ let handle_key model key =
       (match Search_bar.submit model.search_bar with
        | Some term ->
          ignore (Weft_search.add_term model.search term);
-         refresh_search model
+         request_refresh model
        | None -> ())
     | `Backspace ->
       Search_bar.handle_backspace model.search_bar
@@ -239,21 +260,21 @@ let handle_key model key =
         | Timeline -> Sources)
     | `ASCII 's' ->
       (match Sidebar.toggle_selected_source model.sidebar with
-       | Some _sid -> refresh_search model
+       | Some _sid -> request_refresh model
        | None -> ())
     | `ASCII 't' ->
       let terms = Weft_search.all_terms model.search in
       (match Sidebar.selected_term_name model.sidebar ~terms with
        | Some term_name ->
          Weft_search.toggle_term model.search term_name;
-         refresh_search model
+         request_refresh model
        | None -> ())
     | `ASCII 'd' ->
       let terms = Weft_search.all_terms model.search in
       (match Sidebar.selected_term_name model.sidebar ~terms with
        | Some term_name ->
          Weft_search.remove_term model.search term_name;
-         refresh_search model
+         request_refresh model
        | None -> ())
     (* Time range controls *)
     | `ASCII '<' | `ASCII ',' ->
@@ -268,14 +289,14 @@ let handle_key model key =
       in
       let half = window_seconds tr / 2 in
       model.time_range <- Some (shift_range tr (-half));
-      refresh_search model
+      request_refresh model
     | `ASCII '>' | `ASCII '.' ->
       (* Shift window later *)
       (match model.time_range with
        | Some tr ->
          let half = window_seconds tr / 2 in
          model.time_range <- Some (shift_range tr half);
-         refresh_search model
+         request_refresh model
        | None -> ())
     | `ASCII '-' | `ASCII '_' ->
       (* Narrow window *)
@@ -284,7 +305,7 @@ let handle_key model key =
          let narrowed = narrow_range tr in
          if window_seconds narrowed > 60 then begin
            model.time_range <- Some narrowed;
-           refresh_search model
+           request_refresh model
          end
        | None ->
          let now = Ptime_clock.now () in
@@ -292,18 +313,18 @@ let handle_key model key =
            start_ = (match Ptime.sub_span now (Ptime.Span.of_int_s 1800) with
                       | Some t -> t | None -> now);
            end_ = Some now };
-         refresh_search model)
+         request_refresh model)
     | `ASCII '+' | `ASCII '=' ->
       (* Widen window *)
       (match model.time_range with
        | Some tr ->
          model.time_range <- Some (widen_range tr);
-         refresh_search model
+         request_refresh model
        | None -> ())
     | `ASCII 'r' ->
       (* Reset to full range *)
       model.time_range <- None;
-      refresh_search model
+      request_refresh model
     | `ASCII 'i' ->
       (* Isolate: disable all terms except one *)
       let term_to_isolate = match model.focus with
@@ -320,12 +341,12 @@ let handle_key model key =
       (match term_to_isolate with
        | Some term_name ->
          Weft_search.isolate_term model.search term_name;
-         refresh_search model
+         request_refresh model
        | None -> ())
     | `ASCII 'I' ->
       (* Restore: enable all terms *)
       Weft_search.enable_all_terms model.search;
-      refresh_search model
+      request_refresh model
     | `ASCII '?' ->
       model.overlay <- Help
     | `ASCII 'H' ->

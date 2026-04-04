@@ -257,12 +257,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       | `End | `Key (`ASCII 'C', [`Ctrl]) -> false
       | `Key (key, _mods) ->
         Weft_tui.handle_key model key;
-        let new_terms = Weft_search.enabled_terms search in
-        if new_terms <> !terms_ref then begin
-          terms_ref := new_terms;
-          Weft_tui.refresh_search model;
-          update_cache_stats ()
-        end;
+        terms_ref := Weft_search.enabled_terms search;
         let (w, h) = Notty_unix.Term.size term in
         model.width <- w;
         model.height <- h;
@@ -284,8 +279,43 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       ready
     in
 
+    (* Background search state *)
+    let search_result : (Weft_types.log_entry list) option Atomic.t =
+      Atomic.make None in
+    let search_running = Atomic.make false in
+
+    let spawn_search () =
+      if not (Atomic.get search_running) then begin
+        Atomic.set search_running true;
+        Atomic.set search_result None;
+        let _t = Thread.create (fun () ->
+          let results = Weft_tui.do_search model in
+          Atomic.set search_result (Some results);
+          Atomic.set search_running false
+        ) () in
+        ()
+      end
+    in
+
     let running = ref true in
     while !running do
+      (* Check if a search was requested *)
+      if !(Weft_tui.needs_refresh) then begin
+        Weft_tui.needs_refresh := false;
+        spawn_search ()
+      end;
+
+      (* Check if background search completed *)
+      (match Atomic.get search_result with
+       | Some results ->
+         Atomic.set search_result None;
+         Weft_tui.Timeline.set_entries model.timeline results;
+         update_cache_stats ();
+         let range_desc = Weft_tui.format_time_range model.time_range in
+         Weft_tui.Status.set model.status
+           (Printf.sprintf "%d entries [%s]" (List.length results) range_desc)
+       | None -> ());
+
       let img = Weft_tui.render model in
       Notty_unix.Term.image term img;
 
