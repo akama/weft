@@ -59,31 +59,40 @@ let format_time_range = function
           (fmt_date sd) start_t (fmt_date ed) (time e)
 
 (* Re-run search and update timeline *)
-(* Run a search and update the timeline. Can be called from main thread
-   or from a background thread (results written via pending_results). *)
-let do_search model =
-  let terms = Weft_search.enabled_terms model.search in
-  let entries = if terms <> [] then
-    Weft_search.search model.search ~time_range:model.time_range
+(* Snapshot of search parameters — captured at request time, used by thread *)
+type search_params = {
+  sp_time_range : time_range option;
+  sp_terms : string list;
+  sp_disabled : source_id list;
+}
+
+let snapshot_params model = {
+  sp_time_range = model.time_range;
+  sp_terms = Weft_search.enabled_terms model.search;
+  sp_disabled = model.sidebar.disabled_sources;
+}
+
+(* Run a search with explicit parameters — thread-safe *)
+let do_search_with search params =
+  let entries = if params.sp_terms <> [] then
+    Weft_search.search search ~time_range:params.sp_time_range
   else
-    Weft_search.load_all ?time_range:model.time_range model.search
+    Weft_search.load_all ?time_range:params.sp_time_range search
   in
   let entry_list = List.of_seq (Seq.take 100000 entries) in
-  let disabled = model.sidebar.disabled_sources in
-  let filtered = List.filter (fun (e : log_entry) ->
-    not (List.mem e.source disabled)
-  ) entry_list in
-  filtered
+  List.filter (fun (e : log_entry) ->
+    not (List.mem e.source params.sp_disabled)
+  ) entry_list
 
 (* Synchronous refresh — used for initial load *)
 let refresh_search model =
-  let terms = Weft_search.enabled_terms model.search in
-  let term_desc = match terms with
+  let params = snapshot_params model in
+  let term_desc = match params.sp_terms with
     | [] -> "all entries"
     | [t] -> Printf.sprintf "'%s'" t
     | ts -> Printf.sprintf "%d terms" (List.length ts) in
   Status.set model.status (Printf.sprintf "Searching %s..." term_desc);
-  let results = do_search model in
+  let results = do_search_with model.search params in
   Timeline.set_entries model.timeline results;
   let range_desc = format_time_range model.time_range in
   Status.set model.status

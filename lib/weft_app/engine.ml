@@ -279,22 +279,21 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       ready
     in
 
-    (* Background search state *)
-    let search_result : (Weft_types.log_entry list) option Atomic.t =
+    (* Background search — uses a generation counter to discard stale results *)
+    let search_result : (int * Weft_types.log_entry list) option Atomic.t =
       Atomic.make None in
-    let search_running = Atomic.make false in
+    let search_generation = Atomic.make 0 in
 
     let spawn_search () =
-      if not (Atomic.get search_running) then begin
-        Atomic.set search_running true;
-        Atomic.set search_result None;
-        let _t = Thread.create (fun () ->
-          let results = Weft_tui.do_search model in
-          Atomic.set search_result (Some results);
-          Atomic.set search_running false
-        ) () in
-        ()
-      end
+      let gen = Atomic.fetch_and_add search_generation 1 + 1 in
+      (* Snapshot parameters now — thread uses immutable copy *)
+      let params = Weft_tui.snapshot_params model in
+      let _t = Thread.create (fun () ->
+        let results = Weft_tui.do_search_with search params in
+        if Atomic.get search_generation = gen then
+          Atomic.set search_result (Some (gen, results))
+      ) () in
+      ()
     in
 
     let running = ref true in
@@ -307,13 +306,16 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
 
       (* Check if background search completed *)
       (match Atomic.get search_result with
-       | Some results ->
+       | Some (gen, results) when gen = Atomic.get search_generation ->
          Atomic.set search_result None;
          Weft_tui.Timeline.set_entries model.timeline results;
          update_cache_stats ();
          let range_desc = Weft_tui.format_time_range model.time_range in
          Weft_tui.Status.set model.status
            (Printf.sprintf "%d entries [%s]" (List.length results) range_desc)
+       | Some _ ->
+         (* Stale result from an older search — discard *)
+         Atomic.set search_result None
        | None -> ());
 
       let img = Weft_tui.render model in
