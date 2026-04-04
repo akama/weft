@@ -56,7 +56,7 @@ let search t ~terms ~time_range =
 let tail t ~terms ~emit ~cancel =
   List.iter (fun (_name, src) ->
     if not (Atomic.get cancel) then
-      Local_file.tail src ~terms ~emit ~cancel
+      Local_file.tail_simple src ~terms ~emit ~cancel
   ) t.sub_sources
 
 let discover_archives t =
