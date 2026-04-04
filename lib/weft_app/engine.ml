@@ -352,7 +352,7 @@ let run_dump ~env ~formats_config ~sources_config ~initial_terms
 (* Run in live/follow mode — like dump but keeps watching for new entries *)
 let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
   let fs = Eio.Stdenv.fs env in
-  let (_cache, _pool, search) =
+  let (_cache, pool, search) =
     init_runtime ~env ~formats_config ~sources_config ~initial_terms in
 
   (* Print existing entries first *)
@@ -370,75 +370,100 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
   ) entries;
   Printf.eprintf "-- %d historical entries, now tailing...\n%!" !count;
 
-  (* Build adapters for tailing *)
-  let adapters = List.filter_map (fun (src : source_config) ->
-    match src.source_type, src.path with
-    | File, Some path when Sys.file_exists path ->
-      let fmt = Weft_config.resolve_format formats_config src.format in
-      let pipeline = Option.map Weft_middleware.Pipeline.create fmt in
-      Some (src, path, pipeline)
-    | _ -> None
-  ) sources_config.sources in
-
   let cancel = Atomic.make false in
   Sys.set_signal Sys.sigint (Sys.Signal_handle (fun _ ->
     Atomic.set cancel true));
 
   let terms = if has_terms then initial_terms else [] in
+  let term_res = List.map (fun term ->
+    (term, Re.compile (Re.Pcre.re (Re.Pcre.quote term)))
+  ) terms in
 
-  (* Tail each source — emit entries as they arrive *)
-  let emit (entry : log_entry) =
-    incr count;
-    let entry = match terms with
-      | [] -> entry
-      | _ ->
-        let matched = List.filter (fun term ->
-          let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
-          Re.execp re entry.raw
-        ) terms in
-        { entry with terms = matched }
+  (* Shared emit function: tag terms, run pipeline, print *)
+  let emit_raw ~source ~pipeline_state line =
+    let should_emit = match term_res with
+      | [] -> true
+      | _ -> List.exists (fun (_t, re) -> Re.execp re line) term_res
     in
-    (* Run through pipeline if we have one *)
-    if json then print_endline (Weft_app_fmt.entry_to_json entry)
-    else print_endline (Weft_app_fmt.format_entry entry)
+    if should_emit then begin
+      let entries_to_emit = match pipeline_state with
+        | None ->
+          [{
+            timestamp = Ptime_clock.now ();
+            raw = line; source;
+            terms = []; metadata = [];
+          }]
+        | Some state ->
+          Weft_middleware.Pipeline.feed_line state line
+      in
+      List.iter (fun (entry : log_entry) ->
+        incr count;
+        let entry = match term_res with
+          | [] -> entry
+          | _ ->
+            let matched = List.filter_map (fun (term, re) ->
+              if Re.execp re entry.raw then Some term else None
+            ) term_res in
+            { entry with terms = matched }
+        in
+        if json then print_endline (Weft_app_fmt.entry_to_json entry)
+        else print_endline (Weft_app_fmt.format_entry entry)
+      ) entries_to_emit
+    end
   in
 
   Eio.Switch.run @@ fun sw ->
-  List.iter (fun ((src : source_config), path, pipeline) ->
-    Eio.Fiber.fork ~sw (fun () ->
-      let adapter : Weft_source.Local_file.t = {
-        config = src;
-        path;
-        fs;
-      } in
-      let pipeline_state = Option.map (fun pl ->
-        Weft_middleware.Pipeline.create_stream_state pl ~source:src.name
-      ) pipeline in
-      let process_and_emit line =
-        match pipeline_state with
-        | None -> emit {
-            timestamp = Ptime_clock.now ();
-            raw = line; source = src.name;
-            terms = []; metadata = [];
-          }
-        | Some state ->
-          let entries = Weft_middleware.Pipeline.feed_line state line in
-          List.iter emit entries
-      in
-      let emit_line line =
-        let should_emit = match terms with
-          | [] -> true
-          | _ -> List.exists (fun term ->
-              let re = Re.compile (Re.Pcre.re (Re.Pcre.quote term)) in
-              Re.execp re line
-            ) terms
-        in
-        if should_emit then process_and_emit line
-      in
-      Weft_source.Local_file.tail_simple adapter ~terms:[]
-        ~emit:(fun entry -> emit_line entry.raw) ~cancel
-    )
-  ) adapters;
+
+  List.iter (fun (src : source_config) ->
+    let fmt = Weft_config.resolve_format formats_config src.format in
+    let pipeline = Option.map Weft_middleware.Pipeline.create fmt in
+    let pipeline_state = Option.map (fun pl ->
+      Weft_middleware.Pipeline.create_stream_state pl ~source:src.name
+    ) pipeline in
+
+    match src.source_type with
+    | File ->
+      (match src.path with
+       | Some path when Sys.file_exists path ->
+         Eio.Fiber.fork ~sw (fun () ->
+           let adapter : Weft_source.Local_file.t = {
+             config = src; path; fs;
+           } in
+           Weft_source.Local_file.tail_simple adapter ~terms:[]
+             ~emit:(fun entry ->
+               emit_raw ~source:src.name ~pipeline_state entry.raw)
+             ~cancel
+         )
+       | _ -> ())
+
+    | Remote ->
+      (* Tail via ssh tail -F *)
+      (match src.transport, src.path with
+       | Some _transport, Some path ->
+         let ssh = match Weft_connection.Conn_pool.get_connection pool src.name with
+           | Some conn -> conn.ssh
+           | None -> None
+         in
+         (match ssh with
+          | Some ssh ->
+            Eio.Fiber.fork ~sw (fun () ->
+              Printf.eprintf "Tailing %s:%s via SSH...\n%!" src.name path;
+              let tail_cmd = ["tail"; "-n"; "0"; "-F"; path] in
+              (try
+                 Weft_connection.Ssh_control.run_streaming ssh tail_cmd
+                   ~on_line:(fun line ->
+                     emit_raw ~source:src.name ~pipeline_state line)
+                   ~cancel
+               with Failure msg ->
+                 Printf.eprintf "SSH tail for %s ended: %s\n%!" src.name msg)
+            )
+          | None ->
+            Printf.eprintf "Warning: no SSH connection for %s, skipping tail\n%!"
+              src.name)
+       | _ -> ())
+
+    | Directory | Loki -> ()
+  ) sources_config.sources;
 
   (* Wait until cancelled *)
   while not (Atomic.get cancel) do

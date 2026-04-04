@@ -93,6 +93,34 @@ let run_command_lines t args =
   String.split_on_char '\n' output
   |> List.filter (fun s -> String.length s > 0)
 
+(* Run a long-lived SSH command, calling on_line for each line of output.
+   Uses Unix.open_process_in for streaming reads. Blocks until process
+   exits or cancel is set. *)
+let run_streaming t args ~on_line ~cancel =
+  let (base, host_args) = parse_transport t.transport_cmd in
+  let is_tsh = base = "tsh" in
+  let cmd_parts = if is_tsh then
+    [base] @ host_args @ args
+  else
+    ["ssh";
+     "-o"; Printf.sprintf "ControlPath=%s" t.control_path;
+     "-o"; "ControlMaster=auto"]
+    @ host_args @ args
+  in
+  let cmd_str = String.concat " " (List.map (fun s ->
+    if String.contains s ' ' then "'" ^ s ^ "'" else s
+  ) cmd_parts) in
+  let ic = Unix.open_process_in cmd_str in
+  Fun.protect (fun () ->
+    try
+      while not (Atomic.get cancel) do
+        let line = input_line ic in
+        on_line line
+      done
+    with End_of_file -> ()
+  ) ~finally:(fun () ->
+    ignore (Unix.close_process_in ic))
+
 let close t =
   if t.active then begin
     let (base, _) = parse_transport t.transport_cmd in
