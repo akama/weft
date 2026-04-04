@@ -388,7 +388,7 @@ let run_dump ~env ~formats_config ~sources_config ~initial_terms
 (* Run in live/follow mode — like dump but keeps watching for new entries *)
 let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
   let fs = Eio.Stdenv.fs env in
-  let (_cache, pool, search) =
+  let (cache, pool, search) =
     init_runtime ~env ~formats_config ~sources_config ~initial_terms in
 
   (* Print existing entries first *)
@@ -465,10 +465,41 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
            let adapter : Weft_source.Local_file.t = {
              config = src; path; fs;
            } in
-           Weft_source.Local_file.tail_simple adapter ~terms:[]
+           (* Build rotation callbacks that seal/create cache segments *)
+           let active_seg = ref None in
+           let rotation_cbs : Weft_source.Local_file.rotation_callbacks = {
+             on_seal = (fun () ->
+               match !active_seg with
+               | Some seg ->
+                 let end_time = Ptime_clock.now () in
+                 ignore (Weft_cache.seal_segment cache
+                   ~source_name:src.name seg ~end_time);
+                 Printf.eprintf "Sealed segment for %s on rotation\n%!" src.name;
+                 active_seg := None
+               | None -> ());
+             on_new = (fun () ->
+               let seg = Weft_cache.new_segment cache
+                 ~source_name:src.name
+                 ~origin:(Filename.basename path) in
+               active_seg := Some seg;
+               Printf.eprintf "New segment for %s after rotation\n%!" src.name);
+           } in
+           (* Create initial active segment for this tail session *)
+           let seg = Weft_cache.new_segment cache
+             ~source_name:src.name
+             ~origin:(Filename.basename path ^ " (tail)") in
+           active_seg := Some seg;
+           (* Get drain timeout from format config *)
+           let drain_timeout = match fmt with
+             | Some f -> (match f.rotation with
+               | Some rc -> float_of_int rc.drain_timeout_sec
+               | None -> 5.0)
+             | None -> 5.0
+           in
+           Weft_source.Local_file.tail adapter ~terms:[]
              ~emit:(fun entry ->
                emit_raw ~source:src.name ~pipeline_state entry.raw)
-             ~cancel
+             ~cancel ~on_rotation:rotation_cbs ~drain_timeout ()
          )
        | _ -> ())
 
