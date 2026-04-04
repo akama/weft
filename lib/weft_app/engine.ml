@@ -127,9 +127,9 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
     }
   end;
 
-  (* Initial synchronous load *)
-  Weft_tui.refresh_search model;
-  update_cache_stats ();
+  (* Queue initial load as a background search — TUI renders immediately *)
+  Weft_tui.Status.set model.status "Loading...";
+  Weft_tui.needs_refresh := true;
 
   (* Communication channels *)
   let search_requests : Weft_tui.search_params Eio.Stream.t =
