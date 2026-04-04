@@ -520,6 +520,18 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
                  Weft_connection.Ssh_control.run_streaming ssh tail_cmd
                    ~on_line:(fun line ->
                      emit_raw ~source:src.name ~pipeline_state line)
+                   ~on_stderr:(fun line ->
+                     (* Parse tail -F stderr for rotation signals *)
+                     match Weft_source.Rotation.detect_from_tail_stderr line with
+                     | Some Weft_source.Rotation.File_renamed ->
+                       Printf.eprintf "SSH rotation (rename) for %s:%s\n%!"
+                         src.name path
+                     | Some Weft_source.Rotation.File_truncated ->
+                       Printf.eprintf "SSH rotation (truncate) for %s:%s\n%!"
+                         src.name path
+                     | None ->
+                       (* Other stderr output — log it *)
+                       Printf.eprintf "SSH stderr [%s]: %s\n%!" src.name line)
                    ~cancel
                with Failure msg ->
                  Printf.eprintf "SSH tail for %s ended: %s\n%!" src.name msg)

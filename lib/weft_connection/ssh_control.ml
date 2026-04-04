@@ -93,10 +93,10 @@ let run_command_lines t args =
   String.split_on_char '\n' output
   |> List.filter (fun s -> String.length s > 0)
 
-(* Run a long-lived SSH command, calling on_line for each line of output.
-   Uses Unix.open_process_in for streaming reads. Blocks until process
-   exits or cancel is set. *)
-let run_streaming t args ~on_line ~cancel =
+(* Run a long-lived SSH command, calling on_line for stdout and on_stderr
+   for stderr. Uses Unix.open_process_full for separate channels.
+   Multiplexes both with Unix.select. *)
+let run_streaming t args ~on_line ~on_stderr ~cancel =
   let (base, host_args) = parse_transport t.transport_cmd in
   let is_tsh = base = "tsh" in
   let cmd_parts = if is_tsh then
@@ -110,16 +110,56 @@ let run_streaming t args ~on_line ~cancel =
   let cmd_str = String.concat " " (List.map (fun s ->
     if String.contains s ' ' then "'" ^ s ^ "'" else s
   ) cmd_parts) in
-  let ic = Unix.open_process_in cmd_str in
+  let (stdout_ic, _stdin_oc, stderr_ic) =
+    Unix.open_process_full cmd_str (Unix.environment ()) in
+  let stdout_fd = Unix.descr_of_in_channel stdout_ic in
+  let stderr_fd = Unix.descr_of_in_channel stderr_ic in
+  (* Set non-blocking so we can multiplex with select *)
+  Unix.set_nonblock stdout_fd;
+  Unix.set_nonblock stderr_fd;
+  let stdout_buf = Buffer.create 4096 in
+  let stderr_buf = Buffer.create 256 in
+  let read_lines_from fd buf callback =
+    let tmp = Bytes.create 4096 in
+    (try
+       let n = Unix.read fd tmp 0 4096 in
+       if n = 0 then raise End_of_file;
+       Buffer.add_subbytes buf tmp 0 n;
+       (* Extract complete lines *)
+       let content = Buffer.contents buf in
+       let rec extract_lines start =
+         match String.index_from_opt content start '\n' with
+         | None ->
+           (* Keep partial line in buffer *)
+           Buffer.clear buf;
+           if start < String.length content then
+             Buffer.add_string buf (String.sub content start
+               (String.length content - start))
+         | Some nl_pos ->
+           let line = String.sub content start (nl_pos - start) in
+           callback line;
+           extract_lines (nl_pos + 1)
+       in
+       extract_lines 0
+     with
+     | Unix.Unix_error (Unix.EAGAIN, _, _)
+     | Unix.Unix_error (Unix.EWOULDBLOCK, _, _) -> ()
+     | End_of_file -> raise End_of_file)
+  in
   Fun.protect (fun () ->
     try
       while not (Atomic.get cancel) do
-        let line = input_line ic in
-        on_line line
+        let ready, _, _ = Unix.select [stdout_fd; stderr_fd] [] [] 0.5 in
+        List.iter (fun fd ->
+          if fd = stdout_fd then
+            read_lines_from stdout_fd stdout_buf on_line
+          else if fd = stderr_fd then
+            read_lines_from stderr_fd stderr_buf on_stderr
+        ) ready
       done
     with End_of_file -> ()
   ) ~finally:(fun () ->
-    ignore (Unix.close_process_in ic))
+    ignore (Unix.close_process_full (stdout_ic, _stdin_oc, stderr_ic)))
 
 let close t =
   if t.active then begin

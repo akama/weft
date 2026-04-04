@@ -33,8 +33,22 @@ let init_source t ~source_name ~format =
     | None ->
       { source = source_name; format; segments = []; known_archives = [] }
   in
+  (* Prune segments whose files no longer exist *)
+  let valid_segments, stale_count =
+    let valid = List.filter (fun (seg : Weft_types.segment) ->
+      let path = Filename.concat dir seg.local_path in
+      Sys.file_exists path
+    ) manifest.segments in
+    (valid, List.length manifest.segments - List.length valid)
+  in
+  if stale_count > 0 then
+    Printf.eprintf "Cache %s: pruned %d stale segments\n%!" source_name stale_count;
+  let manifest = { manifest with segments = valid_segments } in
   let manifest = Eviction.run_eviction manifest
     ~max_mb_per_source:t.config.max_mb_per_source in
+  (* Persist the cleaned manifest *)
+  if stale_count > 0 then
+    Manifest.save_manifest ~fs:t.fs ~dir manifest;
   t.manifests <- (source_name, manifest) :: t.manifests;
   manifest
 

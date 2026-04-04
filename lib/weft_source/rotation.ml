@@ -6,12 +6,20 @@ type rotation_event =
   | File_renamed
   | File_truncated
 
-(* Parse tail -F stderr for rotation signals *)
-let tail_renamed_re = Re.compile (Re.Pcre.re {|has been renamed|})
-let tail_truncated_re = Re.compile (Re.Pcre.re {|file truncated|})
+(* Parse tail -F stderr for rotation signals.
+   Different tail implementations use different messages:
+   - GNU coreutils: "has been renamed", "file truncated"
+   - BusyBox/NixOS: "has become inaccessible", "has appeared" *)
+let tail_renamed_re = Re.compile (Re.Pcre.re
+  {|has been renamed|has become inaccessible|})
+let tail_new_file_re = Re.compile (Re.Pcre.re
+  {|has appeared|following new file|})
+let tail_truncated_re = Re.compile (Re.Pcre.re
+  {|file truncated|})
 
 let detect_from_tail_stderr line =
   if Re.execp tail_renamed_re line then Some File_renamed
+  else if Re.execp tail_new_file_re line then Some File_renamed
   else if Re.execp tail_truncated_re line then Some File_truncated
   else None
 
