@@ -8,22 +8,28 @@ type t = {
   mutable selected_term : int;
   mutable cache_size_mb : int;
   mutable cache_segments : int;
-  mutable cache_from : string;
-  mutable cache_to : string;
+  mutable cache_from_date : string;
+  mutable cache_from_time : string;
+  mutable cache_to_date : string;
+  mutable cache_to_time : string;
 }
 
 let create () =
   { sources = []; disabled_sources = [];
     selected_source = 0; selected_term = 0;
     cache_size_mb = 0; cache_segments = 0;
-    cache_from = ""; cache_to = "" }
+    cache_from_date = ""; cache_from_time = "";
+    cache_to_date = ""; cache_to_time = "" }
 
 let update_sources t sources = t.sources <- sources
-let update_cache_info t ~size_mb ~segments ~cache_from ~cache_to =
+let update_cache_info t ~size_mb ~segments
+    ~from_date ~from_time ~to_date ~to_time =
   t.cache_size_mb <- size_mb;
   t.cache_segments <- segments;
-  t.cache_from <- cache_from;
-  t.cache_to <- cache_to
+  t.cache_from_date <- from_date;
+  t.cache_from_time <- from_time;
+  t.cache_to_date <- to_date;
+  t.cache_to_time <- to_time
 
 let source_count t = List.length t.sources
 let term_count terms = List.length terms
@@ -99,11 +105,13 @@ let render_cache t ~width =
     I.string Theme.dim_attr size_str;
     I.string Theme.dim_attr (Printf.sprintf " %d segs" t.cache_segments);
   ] in
-  let range_lines = if t.cache_from <> "" then [
+  let range_lines = if t.cache_from_date <> "" then [
     I.string Theme.dim_attr " from:";
-    I.string Theme.dim_attr (Printf.sprintf "  %s" t.cache_from);
+    I.string Theme.dim_attr (Printf.sprintf "  %s" t.cache_from_date);
+    I.string Theme.dim_attr (Printf.sprintf "  %s" t.cache_from_time);
     I.string Theme.dim_attr " to:";
-    I.string Theme.dim_attr (Printf.sprintf "  %s" t.cache_to);
+    I.string Theme.dim_attr (Printf.sprintf "  %s" t.cache_to_date);
+    I.string Theme.dim_attr (Printf.sprintf "  %s" t.cache_to_time);
   ] else [] in
   I.vcat (title :: lines @ range_lines)
 
