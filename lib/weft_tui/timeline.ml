@@ -44,12 +44,14 @@ let scroll_down t =
 let set_visible_height t h =
   t.visible_height <- max 1 h
 
-let format_timestamp ts =
-  let (_, ((hh, mm, ss), _)) = Ptime.to_date_time ts in
-  (* Get fractional part *)
-  let _d, ps = Ptime.to_span ts |> Ptime.Span.to_d_ps in
+let format_timestamp ~show_date ts =
+  let ((y, mo, d), ((hh, mm, ss), _)) = Ptime.to_date_time ts in
+  let _d_span, ps = Ptime.to_span ts |> Ptime.Span.to_d_ps in
   let ms = Int64.to_int (Int64.rem (Int64.div ps 1_000_000_000L) 1000L) in
-  Printf.sprintf "%02d:%02d:%02d.%03d" hh mm ss ms
+  if show_date then
+    Printf.sprintf "%04d-%02d-%02d %02d:%02d:%02d" y mo d hh mm ss
+  else
+    Printf.sprintf "%02d:%02d:%02d.%03d" hh mm ss ms
 
 let truncate_source src max_len =
   if String.length src <= max_len then
@@ -57,8 +59,17 @@ let truncate_source src max_len =
   else
     String.sub src 0 max_len
 
-let render_entry (entry : log_entry) ~width ~is_selected ~term_list =
-  let ts_str = format_timestamp entry.timestamp in
+let spans_multiple_days (entries : log_entry array) =
+  if Array.length entries < 2 then false
+  else
+    let first = entries.(0) in
+    let last = entries.(Array.length entries - 1) in
+    let (first_date, _) = Ptime.to_date_time first.timestamp in
+    let (last_date, _) = Ptime.to_date_time last.timestamp in
+    first_date <> last_date
+
+let render_entry (entry : log_entry) ~width ~is_selected ~term_list ~show_date =
+  let ts_str = format_timestamp ~show_date entry.timestamp in
   let src_str = truncate_source entry.source 8 in
   let prefix = Printf.sprintf "%s [%s] " ts_str src_str in
   let prefix_len = String.length prefix in
@@ -102,12 +113,14 @@ let render t ~width ~height ~term_list =
     |> I.vsnap ~align:`Top height
     |> I.hsnap ~align:`Left width
   else begin
+    let show_date = spans_multiple_days t.entries in
     let visible_start = t.scroll_offset in
     let visible_end = min num_entries (visible_start + height) in
     let lines = List.init (visible_end - visible_start) (fun i ->
       let idx = visible_start + i in
       let entry = t.entries.(idx) in
       render_entry entry ~width ~is_selected:(idx = t.selected) ~term_list
+        ~show_date
     ) in
     I.vcat lines |> I.vsnap ~align:`Top height
   end
