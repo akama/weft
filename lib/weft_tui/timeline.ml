@@ -1,20 +1,32 @@
 open Notty
 open Weft_types
 
+type sort_order = Asc | Desc
+
 type t = {
   mutable entries : log_entry array;
   mutable selected : int;
   mutable scroll_offset : int;
   mutable visible_height : int;
+  mutable order : sort_order;
 }
 
 let create () =
-  { entries = [||]; selected = 0; scroll_offset = 0; visible_height = 20 }
+  { entries = [||]; selected = 0; scroll_offset = 0;
+    visible_height = 20; order = Asc }
 
 let set_entries t entries =
   t.entries <- Array.of_list entries;
   t.scroll_offset <- 0;
   t.selected <- 0
+
+let toggle_order t =
+  t.order <- (match t.order with Asc -> Desc | Desc -> Asc);
+  t.scroll_offset <- 0;
+  t.selected <- 0
+
+let order_label t =
+  match t.order with Asc -> "oldest first" | Desc -> "newest first"
 
 let append_entry t entry =
   let old_len = Array.length t.entries in
@@ -22,10 +34,19 @@ let append_entry t entry =
   Array.blit t.entries 0 new_arr 0 old_len;
   t.entries <- new_arr
 
+(* Map display index to array index based on sort order *)
+let to_array_idx t display_idx =
+  match t.order with
+  | Asc -> display_idx
+  | Desc -> Array.length t.entries - 1 - display_idx
+
 let selected_entry t =
-  if t.selected >= 0 && t.selected < Array.length t.entries then
-    Some t.entries.(t.selected)
-  else None
+  let n = Array.length t.entries in
+  if n = 0 then None
+  else
+    let idx = to_array_idx t t.selected in
+    if idx >= 0 && idx < n then Some t.entries.(idx)
+    else None
 
 let scroll_up t =
   if t.selected > 0 then begin
@@ -116,11 +137,12 @@ let render t ~width ~height ~term_list =
     let show_date = spans_multiple_days t.entries in
     let visible_start = t.scroll_offset in
     let visible_end = min num_entries (visible_start + height) in
-    let lines = List.init (max 0 (visible_end - visible_start)) (fun i ->
-      let idx = visible_start + i in
-      let entry = t.entries.(idx) in
-      render_entry entry ~width ~is_selected:(idx = t.selected) ~term_list
-        ~show_date
+    let lines = List.init (max 0 (visible_end - visible_start)) (fun display_i ->
+      let display_idx = visible_start + display_i in
+      let array_idx = to_array_idx t display_idx in
+      let entry = t.entries.(array_idx) in
+      render_entry entry ~width ~is_selected:(display_idx = t.selected)
+        ~term_list ~show_date
     ) in
     I.vcat lines |> I.vsnap ~align:`Top height
   end
