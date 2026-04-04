@@ -264,11 +264,44 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                on_seal = (fun () ->
                  seal_active_seg ();
                  Weft_tui.Status.set model.status
-                   (Printf.sprintf "Rotation: sealed %s" src.name));
+                   (Printf.sprintf "Rotation: sealed %s, re-discovering archives..."
+                      src.name);
+                 (* Re-discover archives — the rotated file (.1, .1.gz) is the
+                    authoritative source. Fetch it to replace our tail segment. *)
+                 let archives = Weft_source.Archive.discover_local ~path
+                   |> Weft_source.Archive.sort_by_mtime in
+                 Weft_cache.update_archives cache ~source_name:src.name archives;
+                 List.iter (fun (archive : archive_info) ->
+                   let origin = Filename.basename archive.remote_path in
+                   let already = match Weft_cache.get_manifest cache src.name with
+                     | None -> false
+                     | Some m -> List.exists (fun (s : segment) ->
+                         s.origin = origin) m.segments in
+                   if not already then begin
+                     if Weft_source.Archive.is_compressed archive.remote_path then begin
+                       match Weft_source.Archive.decompressor_for archive.remote_path with
+                       | Some cmd ->
+                         let tmp = Filename.temp_file "weft_rotate_" ".log" in
+                         let ret = Sys.command
+                           (Printf.sprintf "%s '%s' > '%s' 2>/dev/null"
+                              cmd archive.remote_path tmp) in
+                         if ret = 0 then
+                           ignore (Weft_cache.cache_file cache
+                             ~source_name:src.name ~origin ~path:tmp);
+                         (try Sys.remove tmp with Sys_error _ -> ())
+                       | None -> ()
+                     end else
+                       ignore (Weft_cache.cache_file cache
+                         ~source_name:src.name ~origin
+                         ~path:archive.remote_path)
+                   end
+                 ) archives;
+                 Weft_tui.Status.set model.status
+                   (Printf.sprintf "Rotation: %s archives updated" src.name));
                on_new = (fun () ->
                  new_active_seg (Filename.basename path ^ " (post-rotate)");
                  Weft_tui.Status.set model.status
-                   (Printf.sprintf "Rotation: new segment for %s" src.name));
+                   (Printf.sprintf "Rotation: tailing new %s" src.name));
              } in
              (* Eio-aware wait: yields to scheduler instead of blocking *)
              let eio_wait_readable fd timeout =
@@ -333,9 +366,53 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                      ~on_stderr:(fun line ->
                        match Weft_source.Rotation.detect_from_tail_stderr line with
                        | Some Weft_source.Rotation.File_renamed ->
+                         seal_active_seg ();
                          Weft_tui.Status.set model.status
-                           (Printf.sprintf "SSH rotation: %s" src.name)
+                           (Printf.sprintf "SSH rotation: %s, fetching archives..."
+                              src.name);
+                         (* Re-discover and fetch authoritative archives from remote *)
+                         let archives = Weft_source.Archive.discover_remote
+                           ~ssh ~path
+                           |> Weft_source.Archive.sort_by_mtime in
+                         Weft_cache.update_archives cache
+                           ~source_name:src.name archives;
+                         List.iter (fun (archive : archive_info) ->
+                           let origin = Filename.basename archive.remote_path in
+                           let already = match Weft_cache.get_manifest cache
+                             src.name with
+                             | None -> false
+                             | Some m -> List.exists (fun (s : segment) ->
+                                 s.origin = origin) m.segments in
+                           if not already then begin
+                             let decomp = match
+                               Weft_source.Archive.decompressor_for
+                                 archive.remote_path with
+                               | Some cmd -> cmd | None -> "cat" in
+                             (try
+                                let data =
+                                  Weft_connection.Ssh_control.run_command ssh
+                                    [decomp; archive.remote_path] in
+                                if String.length data > 0 then begin
+                                  let tmp = Filename.temp_file "weft_ssh_rot_" ".log" in
+                                  let oc = open_out tmp in
+                                  output_string oc data;
+                                  close_out oc;
+                                  ignore (Weft_cache.cache_file cache
+                                    ~source_name:src.name ~origin ~path:tmp);
+                                  (try Sys.remove tmp with Sys_error _ -> ())
+                                end
+                              with Failure msg ->
+                                Weft_tui.Status.set model.status
+                                  (Printf.sprintf "Fetch %s failed: %s" origin msg))
+                           end
+                         ) archives;
+                         new_active_seg (Filename.basename path ^ " (post-rotate)");
+                         Weft_tui.Status.set model.status
+                           (Printf.sprintf "SSH rotation: %s archives updated"
+                              src.name)
                        | Some Weft_source.Rotation.File_truncated ->
+                         seal_active_seg ();
+                         new_active_seg (Filename.basename path ^ " (truncated)");
                          Weft_tui.Status.set model.status
                            (Printf.sprintf "SSH truncate: %s" src.name)
                        | None -> ())
