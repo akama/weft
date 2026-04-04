@@ -223,8 +223,20 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   model.width <- w;
   model.height <- h;
 
-  (* Do initial data load synchronously — this populates the cache
-     and runs the search, giving immediate results *)
+  (* Default to last hour if no time range and no terms specified —
+     otherwise opening the TUI on 28 hours of archives shows only the
+     oldest entries before reaching the limit *)
+  if model.time_range = None && initial_terms = [] then begin
+    let now = Ptime_clock.now () in
+    let one_hour = Ptime.Span.of_int_s 3600 in
+    model.time_range <- Some {
+      start_ = (match Ptime.sub_span now one_hour with
+                | Some t -> t | None -> now);
+      end_ = None;
+    }
+  end;
+
+  (* Do initial data load synchronously *)
   Weft_tui.refresh_search model;
   update_cache_stats ();
 

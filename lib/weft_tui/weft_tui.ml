@@ -42,24 +42,13 @@ let refresh_search model =
   let entries = if terms <> [] then
     Weft_search.search model.search ~time_range:model.time_range
   else
-    Weft_search.load_all model.search
+    Weft_search.load_all ?time_range:model.time_range model.search
   in
-  let entry_list = List.of_seq (Seq.take 10000 entries) in
+  let entry_list = List.of_seq (Seq.take 100000 entries) in
   let filtered = List.filter (fun (e : log_entry) ->
     Sidebar.is_source_enabled model.sidebar e.source
   ) entry_list in
-  (* Apply time range filter for load_all (search already filters) *)
-  let time_filtered = match model.time_range, terms with
-    | Some tr, [] ->
-      List.filter (fun (e : log_entry) ->
-        Ptime.is_later e.timestamp ~than:tr.start_ &&
-        (match tr.end_ with
-         | None -> true
-         | Some end_t -> Ptime.is_earlier e.timestamp ~than:end_t)
-      ) filtered
-    | _ -> filtered
-  in
-  Timeline.set_entries model.timeline time_filtered
+  Timeline.set_entries model.timeline filtered
 
 (* Time range helpers *)
 let window_seconds tr =
