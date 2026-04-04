@@ -112,7 +112,17 @@ let default_wait_readable fd timeout =
   let ready, _, _ = Unix.select [fd] [] [] timeout in
   ready <> []
 
-(* Tail using inotify for efficient file watching.
+(* Polling-based wait: check if file has grown (for non-inotify systems) *)
+let poll_wait_for_changes ~path ~last_size ~wait_readable_fn ~timeout =
+  (* Use a dummy fd approach — just sleep the timeout then check file size *)
+  ignore (wait_readable_fn Unix.stdin timeout);
+  try
+    let stat = Unix.stat path in
+    let new_size = Int64.of_int stat.Unix.st_size in
+    new_size > !last_size
+  with Unix.Unix_error _ -> false
+
+(* Tail using inotify (Linux) or polling fallback (macOS/other).
    wait_readable: function to poll fd readability. Pass an Eio-aware
    version when running inside Eio to avoid blocking the scheduler. *)
 let tail t ~terms ~emit ~cancel
@@ -220,5 +230,61 @@ let tail t ~terms ~emit ~cancel
 (* Simplified tail without rotation callbacks — backward compat *)
 let tail_simple t ~terms ~emit ~cancel =
   tail t ~terms ~emit ~cancel ()
+
+(* Polling-based tail for systems without inotify (macOS, etc).
+   Checks file size every poll_interval_ms. Less efficient but portable. *)
+let tail_poll t ~terms ~emit ~cancel
+    ?(on_rotation : rotation_callbacks option)
+    ?(poll_interval_ms = 500) () =
+  let pattern = if terms = [] then None
+    else Some (Re.compile (Re.Pcre.re (String.concat "|"
+      (List.map Re.Pcre.quote terms)))) in
+  let source = t.config.name in
+  let emit_line line =
+    let matches = match pattern with
+      | None -> true | Some re -> Re.execp re line in
+    if matches then begin
+      let matched_terms = match pattern with
+        | None -> terms
+        | Some _ ->
+          List.filter (fun term ->
+            Re.execp (Re.compile (Re.Pcre.re (Re.Pcre.quote term))) line
+          ) terms in
+      emit { timestamp = Ptime_clock.now (); raw = line;
+             source; terms = matched_terms; metadata = [] }
+    end
+  in
+  let ic = ref (open_in t.path) in
+  seek_in !ic (in_channel_length !ic);
+  let last_inode = ref (Unix.stat t.path).Unix.st_ino in
+  let last_size = ref (Int64.of_int (in_channel_length !ic)) in
+  Fun.protect (fun () ->
+    while not (Atomic.get cancel) do
+      (* Check for rotation *)
+      (match Rotation.check_local_rotation ~path:t.path
+               ~last_inode:!last_inode ~last_size:!last_size with
+       | Some (event, new_inode, new_size) ->
+         (* Drain old fd *)
+         let lines = read_new_lines !ic in
+         List.iter emit_line lines;
+         (match on_rotation, event with
+          | Some cb, _ -> cb.on_seal ()
+          | None, _ -> ());
+         close_in_noerr !ic;
+         last_inode := new_inode;
+         last_size := new_size;
+         Unix.sleepf 0.1;
+         if Sys.file_exists t.path then begin
+           (match on_rotation with
+            | Some cb -> cb.on_new () | None -> ());
+           ic := open_in t.path
+         end
+       | None ->
+         let lines = read_new_lines !ic in
+         List.iter emit_line lines;
+         last_size := Int64.of_int (pos_in !ic));
+      Unix.sleepf (float_of_int poll_interval_ms /. 1000.0)
+    done
+  ) ~finally:(fun () -> close_in_noerr !ic)
 
 let close _t = ()

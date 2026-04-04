@@ -116,12 +116,24 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   model.width <- w;
   model.height <- h;
 
-  (* Default to last hour when no range and no terms *)
+  (* Default to configured default_time_range when no range and no terms *)
   if model.time_range = None && initial_terms = [] then begin
+    let default_str = sources_config.general.default_time_range in
+    let seconds =
+      let re = Re.compile (Re.Pcre.re {|^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$|}) in
+      match Re.exec_opt re default_str with
+      | Some g ->
+        let h = try int_of_string (Re.Group.get g 1) with Not_found -> 0 in
+        let m = try int_of_string (Re.Group.get g 2) with Not_found -> 0 in
+        let s = try int_of_string (Re.Group.get g 3) with Not_found -> 0 in
+        let total = h * 3600 + m * 60 + s in
+        if total > 0 then total else 3600
+      | None -> 3600
+    in
     let now = Ptime_clock.now () in
-    let one_hour = Ptime.Span.of_int_s 3600 in
+    let span = Ptime.Span.of_int_s seconds in
     model.time_range <- Some {
-      start_ = (match Ptime.sub_span now one_hour with
+      start_ = (match Ptime.sub_span now span with
                 | Some t -> t | None -> now);
       end_ = None;
     }
@@ -140,6 +152,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   let tail_entries : log_entry Eio.Stream.t =
     Eio.Stream.create 4096 in
   let tail_cancel = Atomic.make false in
+  let tail_dedup = Weft_merge.Dedup.create ~max_size:50000 () in
 
   let fs = Eio.Stdenv.fs env in
 
@@ -150,7 +163,9 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   ) (fun () ->
     try Eio.Switch.run (fun sw ->
 
-    (* Search fiber — picks up requests, runs search, posts results *)
+    (* Search fiber — picks up requests, runs search with timeout, posts results *)
+    let catch_up_timeout =
+      float_of_int sources_config.limits.catch_up_timeout_sec in
     Eio.Fiber.fork ~sw (fun () ->
       while true do
         let params = Eio.Stream.take search_requests in
@@ -161,9 +176,16 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
           | None -> ()
         in
         drain ();
-        let results = Weft_tui.do_search_with search !params in
-        ignore (Eio.Stream.take_nonblocking search_results);
-        Eio.Stream.add search_results results
+        (match Eio.Time.with_timeout clock catch_up_timeout (fun () ->
+           Ok (Weft_tui.do_search_with search !params)
+         ) with
+         | Ok results ->
+           ignore (Eio.Stream.take_nonblocking search_results);
+           Eio.Stream.add search_results results
+         | Error `Timeout ->
+           Weft_tui.Status.set model.status
+             (Printf.sprintf "Search timed out after %ds"
+                sources_config.limits.catch_up_timeout_sec))
       done
     );
 
@@ -453,7 +475,89 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
            )
          | None -> ())
 
-      | Directory -> ()
+      | Directory ->
+        (* Expand glob and create per-file tail fibers (§12.2) *)
+        (match src.glob with
+         | Some glob_pattern ->
+           let files = Weft_source.Local_dir.expand_glob glob_pattern in
+           List.iter (fun filepath ->
+             if Sys.file_exists filepath then begin
+               let sub_name = Printf.sprintf "%s:%s" src.name
+                 (Filename.basename filepath) in
+               let sub_pipeline_state = Option.map (fun pl ->
+                 Weft_middleware.Pipeline.create_stream_state pl ~source:sub_name
+               ) pipeline in
+               (* Each sub-file gets its own tail fiber *)
+               let sub_seg = ref (Weft_cache.new_segment cache
+                 ~source_name:sub_name ~origin:"tail") in
+               ignore sub_seg;
+               let sub_buf = Buffer.create 4096 in
+               let sub_line_count = ref 0 in
+               let flush_sub () =
+                 if Buffer.length sub_buf > 0 then begin
+                   let data = Buffer.contents sub_buf in
+                   Buffer.clear sub_buf;
+                   ignore (Weft_cache.store_data cache
+                     ~source_name:src.name !sub_seg data)
+                 end in
+               Eio.Fiber.fork ~sw (fun () ->
+                 let adapter : Weft_source.Local_file.t = {
+                   config = { src with name = sub_name; path = Some filepath };
+                   path = filepath; fs;
+                 } in
+                 let eio_wait fd timeout =
+                   match Eio.Time.with_timeout clock timeout (fun () ->
+                     Eio_unix.await_readable fd; Ok true
+                   ) with
+                   | Ok true -> true | Ok false -> false
+                   | Error `Timeout -> false
+                 in
+                 let sub_emit_line line =
+                   Buffer.add_string sub_buf line;
+                   Buffer.add_char sub_buf '\n';
+                   incr sub_line_count;
+                   if !sub_line_count mod 50 = 0 then flush_sub ();
+                   let entries_to_emit = match sub_pipeline_state with
+                     | None ->
+                       [{ timestamp = Ptime_clock.now (); raw = line;
+                          source = sub_name; terms = []; metadata = [] }]
+                     | Some state ->
+                       Weft_middleware.Pipeline.feed_line state line
+                   in
+                   let current_terms = !terms_ref in
+                   let term_res = List.map (fun t ->
+                     (t, Re.compile (Re.Pcre.re (Re.Pcre.quote t)))
+                   ) current_terms in
+                   List.iter (fun (entry : log_entry) ->
+                     let dominated = match term_res with
+                       | [] -> true
+                       | _ -> List.exists (fun (_t, re) ->
+                           Re.execp re entry.raw) term_res in
+                     if dominated then begin
+                       let entry = match term_res with
+                         | [] -> entry
+                         | _ ->
+                           let matched = List.filter_map (fun (t, re) ->
+                             if Re.execp re entry.raw then Some t else None
+                           ) term_res in
+                           { entry with terms = matched }
+                       in
+                       Eio.Stream.add tail_entries entry
+                     end
+                   ) entries_to_emit
+                 in
+                 (try
+                    Weft_source.Local_file.tail adapter ~terms:[]
+                      ~emit:(fun entry -> sub_emit_line entry.raw)
+                      ~cancel:tail_cancel ~wait_readable:eio_wait ()
+                  with exn ->
+                    Weft_tui.Status.set model.status
+                      (Printf.sprintf "Tail %s: %s" sub_name
+                         (Printexc.to_string exn)))
+               )
+             end
+           ) files
+         | None -> ())
     ) sources_config.sources;
 
     (* TUI event loop *)
@@ -496,13 +600,15 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
            (Printf.sprintf "%d entries [%s]" (List.length results) range_desc)
        | None -> ());
 
-      (* Pick up new tail entries *)
+      (* Pick up new tail entries — dedup against existing timeline (§13.3) *)
       let new_count = ref 0 in
       let rec drain_tail () =
         match Eio.Stream.take_nonblocking tail_entries with
         | Some entry ->
-          Weft_tui.Timeline.append_entry model.timeline entry;
-          incr new_count;
+          if not (Weft_merge.Dedup.check_and_mark tail_dedup entry) then begin
+            Weft_tui.Timeline.append_entry model.timeline entry;
+            incr new_count
+          end;
           drain_tail ()
         | None -> ()
       in
