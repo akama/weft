@@ -71,9 +71,13 @@ let render ~entries ~sources ~width ~height =
 
     let gmax = Array.fold_left max 0 total in
 
+    (* Count sources with entries *)
+    let n_active = List.init n_sources (fun si ->
+      Array.fold_left (+) 0 per_src.(si)) |> List.filter (fun c -> c > 0)
+      |> List.length in
     let title = I.string A.(st bold)
-      (Printf.sprintf "  Log Density: %s -> %s  (%d entries)"
-         (format_hm_time !min_t) (format_hm_time !max_t) n) in
+      (Printf.sprintf "  Log Density: %s -> %s  (%d entries across %d sources)"
+         (format_hm_time !min_t) (format_hm_time !max_t) n n_active) in
 
     let total_label = I.string A.(fg lightcyan) (Printf.sprintf " %-*s" lw "TOTAL") in
     let total_bar = I.hcat (total_label :: make_bar total gmax cw) in
@@ -82,9 +86,14 @@ let render ~entries ~sources ~width ~height =
       (String.make (lw + 1) ' ' ^ String.make (min cw (width - lw - 2)) '-') in
 
     let avail = max 0 (height - 6) in
-    let shown = min n_sources avail in
-    let src_rows = List.init shown (fun si ->
-      let name = List.nth source_names si in
+    (* Only show sources that have entries *)
+    let active_sources = List.init n_sources (fun si ->
+      let count = Array.fold_left (+) 0 per_src.(si) in
+      (si, List.nth source_names si, count)
+    ) |> List.filter (fun (_, _, count) -> count > 0) in
+    let shown = min (List.length active_sources) avail in
+    let src_rows = List.filteri (fun i _ -> i < shown) active_sources
+      |> List.map (fun (si, name, _count) ->
       let short = if String.length name > lw - 1 then
         String.sub name 0 (lw - 1) else name in
       let label = I.string A.(fg lightblack) (Printf.sprintf " %-*s" lw short) in
@@ -92,22 +101,23 @@ let render ~entries ~sources ~width ~height =
       I.hcat (label :: make_bar per_src.(si) smax cw)
     ) in
 
-    (* Time axis *)
-    let tick_iv = max 1 (cw / 8) in
-    let axis_parts = List.init cw (fun i ->
-      if i mod tick_iv = 0 then
-        let off = float_of_int i *. bucket_s in
-        let span = Option.value ~default:Ptime.Span.zero
-          (Ptime.Span.of_float_s off) in
-        let t = Option.value ~default:!min_t (Ptime.add_span !min_t span) in
-        I.string A.(fg lightblack) (format_hm_time t)
-      else if i mod tick_iv < 5 then
-        I.empty
-      else
-        I.string A.empty " "
-    ) in
+    (* Time axis — show evenly spaced labels *)
+    let n_ticks = min 8 (cw / 10) in
+    let tick_iv = if n_ticks > 0 then cw / n_ticks else cw in
+    let axis_str = Bytes.make cw ' ' in
+    for tick = 0 to n_ticks do
+      let col = min (cw - 1) (tick * tick_iv) in
+      let off = float_of_int col *. bucket_s in
+      let span = Option.value ~default:Ptime.Span.zero
+        (Ptime.Span.of_float_s off) in
+      let t = Option.value ~default:!min_t (Ptime.add_span !min_t span) in
+      let label = format_hm_time t in
+      let label_len = min (String.length label) (cw - col) in
+      Bytes.blit_string label 0 axis_str col label_len
+    done;
     let axis_label = I.string A.empty (String.make (lw + 1) ' ') in
-    let axis = I.hcat (axis_label :: axis_parts) in
+    let axis = I.hcat [axis_label;
+      I.string A.(fg lightblack) (Bytes.to_string axis_str)] in
 
     let legend = I.string A.(fg lightblack)
       "  .=low :=med #=high @=peak  |  H=close  </>:pan  -/+:zoom  r=reset" in
