@@ -167,7 +167,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       done
     );
 
-    (* Per-source tail fibers — watch for new entries and push to tail_entries *)
+    (* Per-source tail fibers — watch for new entries and push to tail_entries.
+       Each source gets an active cache segment for tail writes (design §17). *)
     List.iter (fun (src : source_config) ->
       let fmt = Weft_config.resolve_format formats_config src.format in
       let pipeline = Option.map Weft_middleware.Pipeline.create fmt in
@@ -175,7 +176,30 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
         Weft_middleware.Pipeline.create_stream_state pl ~source:src.name
       ) pipeline in
 
+      (* Active cache segment for this source's tail data *)
+      let tail_seg = Weft_cache.new_segment cache
+        ~source_name:src.name ~origin:"tail" in
+      ignore tail_seg;
+      let cache_buf = Buffer.create 4096 in
+      let cache_flush_interval = 50 in  (* flush every N lines *)
+      let cache_line_count = ref 0 in
+
+      let flush_cache_buf () =
+        if Buffer.length cache_buf > 0 then begin
+          let data = Buffer.contents cache_buf in
+          Buffer.clear cache_buf;
+          ignore (Weft_cache.store_data cache ~source_name:src.name
+            tail_seg data)
+        end
+      in
+
       let emit_line source line =
+        (* Write raw line to cache segment *)
+        Buffer.add_string cache_buf line;
+        Buffer.add_char cache_buf '\n';
+        incr cache_line_count;
+        if !cache_line_count mod cache_flush_interval = 0 then
+          flush_cache_buf ();
         let entries_to_emit = match pipeline_state with
           | None ->
             [{ timestamp = Ptime_clock.now (); raw = line; source;
