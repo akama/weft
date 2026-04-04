@@ -28,7 +28,7 @@ let toggle_order t =
 let order_label t =
   match t.order with Asc -> "oldest first" | Desc -> "newest first"
 
-let append_entry t entry =
+let append_entry t (entry : log_entry) =
   let old_len = Array.length t.entries in
   let new_arr = Array.make (old_len + 1) entry in
   Array.blit t.entries 0 new_arr 0 old_len;
