@@ -48,4 +48,4 @@ let hline width =
   I.string border_attr (String.make width '-')
 
 let vline height =
-  I.vcat (List.init height (fun _ -> I.string border_attr "|"))
+  I.vcat (List.init (max 0 height) (fun _ -> I.string border_attr "|"))
