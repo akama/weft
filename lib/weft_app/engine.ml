@@ -217,10 +217,29 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
 
   (* Create TUI *)
   let model = Weft_tui.create ~search in
-  let source_statuses = List.map (fun (src : source_config) ->
-    (src.name, Weft_connection.Conn_pool.get_status pool src.name)
-  ) sources_config.sources in
-  Weft_tui.Sidebar.update_sources model.sidebar source_statuses;
+  let update_source_statuses () =
+    let source_statuses = List.map (fun (src : source_config) ->
+      (src.name, Weft_connection.Conn_pool.get_status pool src.name)
+    ) sources_config.sources in
+    Weft_tui.Sidebar.update_sources model.sidebar source_statuses
+  in
+  let update_cache_stats () =
+    let (total_size, total_segments, (earliest, latest)) =
+      Weft_cache.cache_stats cache in
+    let size_mb = Int64.to_int (Int64.div total_size (Int64.of_int (1024 * 1024))) in
+    let range = match earliest, latest with
+      | Some s, Some e ->
+        let (sd, _) = Ptime.to_date_time s in
+        let (ed, _) = Ptime.to_date_time e in
+        let fmt (y, m, d) = Printf.sprintf "%04d-%02d-%02d" y m d in
+        if sd = ed then fmt sd else Printf.sprintf "%s to %s" (fmt sd) (fmt ed)
+      | _ -> ""
+    in
+    Weft_tui.Sidebar.update_cache_info model.sidebar
+      ~size_mb ~segments:total_segments ~time_range:range
+  in
+  update_source_statuses ();
+  update_cache_stats ();
 
   (* TUI event loop — runs in main fiber *)
   let term = Notty_unix.Term.create () in
@@ -235,6 +254,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
       | None -> ()
       | Some (Log_entries entries) ->
         List.iter (fun e -> Weft_tui.Timeline.append_entry model.timeline e) entries;
+        update_cache_stats ();
         drain ()
       | Some (Status_update (sid, status)) ->
         let statuses = List.map (fun (src : source_config) ->
@@ -269,10 +289,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
           let new_terms = Weft_search.enabled_terms search in
           if new_terms <> !terms_ref then begin
             terms_ref := new_terms;
-            (* Re-search with new terms *)
-            let entries = Weft_search.search search ~time_range:None in
-            let entry_list = List.of_seq (Seq.take 10000 entries) in
-            Weft_tui.Timeline.set_entries model.timeline entry_list
+            (* §14: catch-up from cache with updated terms (local I/O only) *)
+            Weft_tui.refresh_search model
           end;
           if model.quit then running := false;
           let (w, h) = Notty_unix.Term.size term in

@@ -36,10 +36,14 @@ let establish (proc : _ Eio.Process.mgr) t =
   let run = make_runner proc in
   t.run <- Some run;
   (* Ensure socket directory exists *)
-  (try ignore (run ["mkdir"; "-p"; socket_dir])
+  (try
+     ignore (run ["mkdir"; "-p"; "-m"; "0700"; socket_dir])
    with Eio.Io _ as e ->
      Printf.eprintf "Warning: could not create socket dir: %s\n"
        (Printexc.to_string e));
+  (* Ensure restrictive permissions on control socket dir *)
+  (try Unix.chmod socket_dir 0o700
+   with Unix.Unix_error _ -> ());
   let (base, args) = parse_transport t.transport_cmd in
   let is_tsh = base = "tsh" in
   if is_tsh then begin

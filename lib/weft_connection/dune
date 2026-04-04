@@ -1,4 +1,4 @@
 (library
  (name weft_connection)
  (public_name weft.connection)
- (libraries weft_types weft_config eio))
+ (libraries weft_types weft_config eio unix))
