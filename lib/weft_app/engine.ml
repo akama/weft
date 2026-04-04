@@ -205,17 +205,20 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
     let (total_size, total_segments, (earliest, latest)) =
       Weft_cache.cache_stats cache in
     let size_mb = Int64.to_int (Int64.div total_size (Int64.of_int (1024 * 1024))) in
-    let fmt_dt t =
-      let ((_y, mo, d), ((hh, mm, _ss), _)) = Ptime.to_date_time t in
-      Printf.sprintf "%02d-%02d %02d:%02d" mo d hh mm
-    in
-    let (cache_from, cache_to) = match earliest, latest with
-      | Some s, Some e -> (fmt_dt s, fmt_dt e)
-      | Some s, None -> (fmt_dt s, "now")
-      | _ -> ("", "")
+    let fmt_date t =
+      let ((_y, mo, d), _) = Ptime.to_date_time t in
+      Printf.sprintf "%02d-%02d" mo d in
+    let fmt_time t =
+      let (_, ((hh, mm, ss), _)) = Ptime.to_date_time t in
+      Printf.sprintf "%02d:%02d:%02d" hh mm ss in
+    let (fd, ft, td, tt) = match earliest, latest with
+      | Some s, Some e -> (fmt_date s, fmt_time s, fmt_date e, fmt_time e)
+      | Some s, None -> (fmt_date s, fmt_time s, "", "now")
+      | _ -> ("", "", "", "")
     in
     Weft_tui.Sidebar.update_cache_info model.sidebar
-      ~size_mb ~segments:total_segments ~cache_from ~cache_to
+      ~size_mb ~segments:total_segments
+      ~from_date:fd ~from_time:ft ~to_date:td ~to_time:tt
   in
   update_source_statuses ();
 
