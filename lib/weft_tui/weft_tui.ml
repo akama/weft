@@ -64,14 +64,21 @@ let window_seconds tr =
      | exception _ -> 3600)
 
 let shift_range tr seconds =
-  let span = Ptime.Span.of_int_s seconds in
-  let start_ = match Ptime.add_span tr.start_ span with
-    | Some t -> t | None -> tr.start_ in
-  let end_ = match tr.end_ with
-    | None -> None
-    | Some e -> Ptime.add_span e span
-  in
-  { start_; end_ }
+  let span = Ptime.Span.of_int_s (abs seconds) in
+  if seconds >= 0 then
+    let start_ = match Ptime.add_span tr.start_ span with
+      | Some t -> t | None -> tr.start_ in
+    let end_ = match tr.end_ with
+      | None -> None
+      | Some e -> Ptime.add_span e span in
+    { start_; end_ }
+  else
+    let start_ = match Ptime.sub_span tr.start_ span with
+      | Some t -> t | None -> tr.start_ in
+    let end_ = match tr.end_ with
+      | None -> None
+      | Some e -> Ptime.sub_span e span in
+    { start_; end_ }
 
 let widen_range tr =
   let half = window_seconds tr / 2 in
@@ -325,8 +332,8 @@ let render model =
   let time_bar_height = 1 in
   let detail_height = if Detail.is_expanded model.detail then min 10 (h / 3) else 0 in
   let progress_height = if model.progress.tasks = [] then 0 else 1 in
-  let timeline_height = h - search_height - time_bar_height - detail_height
-    - progress_height - 2 in
+  let timeline_height = max 1 (h - search_height - time_bar_height - detail_height
+    - progress_height - 2) in
 
   let terms = Weft_search.all_terms model.search in
 
