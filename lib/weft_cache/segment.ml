@@ -23,17 +23,17 @@ let compute_hash (fs : Eio.Fs.dir_ty Eio.Path.t) path =
   let hash = Digestif.SHA256.digest_string data in
   Digestif.SHA256.to_hex hash
 
-let seal seg ~(fs : Eio.Fs.dir_ty Eio.Path.t) ~end_time =
+let seal (seg : segment) ~(fs : Eio.Fs.dir_ty Eio.Path.t) ~full_path ~end_time =
   let content_hash =
-    try Some (compute_hash fs seg.local_path)
+    try Some (compute_hash fs full_path)
     with Eio.Io _ as e ->
       Printf.eprintf "Warning: could not hash segment %s: %s\n"
-        seg.local_path (Printexc.to_string e);
+        full_path (Printexc.to_string e);
       None
   in
   let size_bytes =
     try
-      let stat = Eio.Path.stat ~follow:true Eio.Path.(fs / seg.local_path) in
+      let stat = Eio.Path.stat ~follow:true Eio.Path.(fs / full_path) in
       Int64.of_int (Optint.Int63.to_int stat.size)
     with Eio.Io _ -> seg.size_bytes
   in

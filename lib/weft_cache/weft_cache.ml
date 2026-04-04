@@ -87,7 +87,9 @@ let store_data t ~source_name seg data =
   seg
 
 let seal_segment t ~source_name seg ~end_time =
-  let sealed = Segment.seal seg ~fs:t.fs ~end_time in
+  let dir = Filename.concat t.base_dir source_name in
+  let full_path = Filename.concat dir seg.local_path in
+  let sealed = Segment.seal seg ~fs:t.fs ~full_path ~end_time in
   (match get_manifest t source_name with
    | None -> ()
    | Some manifest ->
