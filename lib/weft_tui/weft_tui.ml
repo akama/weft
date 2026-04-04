@@ -11,6 +11,7 @@ type model = {
   sidebar : Sidebar.t;
   detail : Detail.t;
   progress : Progress.t;
+  status : Status.t;
   search : Weft_search.t;
   mutable focus : focus;
   mutable quit : bool;
@@ -27,6 +28,7 @@ let create ~search ~time_range =
     sidebar = Sidebar.create ();
     detail = Detail.create ();
     progress = Progress.create ();
+    status = Status.create ();
     search;
     focus = Timeline;
     quit = false;
@@ -36,9 +38,34 @@ let create ~search ~time_range =
     overlay = None_;
   }
 
+let format_time_range = function
+  | None -> "all time"
+  | Some tr ->
+    let date t = let ((_y, mo, d), _) = Ptime.to_date_time t in (mo, d) in
+    let time t = let (_, ((hh, mm, ss), _)) = Ptime.to_date_time t in
+      Printf.sprintf "%02d:%02d:%02d" hh mm ss in
+    let fmt_date (mo, d) = Printf.sprintf "%02d-%02d" mo d in
+    let start_t = time tr.start_ in
+    match tr.end_ with
+    | None ->
+      Printf.sprintf "%s: %s -> now" (fmt_date (date tr.start_)) start_t
+    | Some e ->
+      let sd = date tr.start_ in
+      let ed = date e in
+      if sd = ed then
+        Printf.sprintf "%s: %s -> %s" (fmt_date sd) start_t (time e)
+      else
+        Printf.sprintf "%s %s -> %s %s"
+          (fmt_date sd) start_t (fmt_date ed) (time e)
+
 (* Re-run search and update timeline *)
 let refresh_search model =
   let terms = Weft_search.enabled_terms model.search in
+  let term_desc = match terms with
+    | [] -> "all entries"
+    | [t] -> Printf.sprintf "'%s'" t
+    | ts -> Printf.sprintf "%d terms" (List.length ts) in
+  Status.set model.status (Printf.sprintf "Searching %s..." term_desc);
   let entries = if terms <> [] then
     Weft_search.search model.search ~time_range:model.time_range
   else
@@ -48,7 +75,10 @@ let refresh_search model =
   let filtered = List.filter (fun (e : log_entry) ->
     Sidebar.is_source_enabled model.sidebar e.source
   ) entry_list in
-  Timeline.set_entries model.timeline filtered
+  Timeline.set_entries model.timeline filtered;
+  let range_desc = format_time_range model.time_range in
+  Status.set model.status
+    (Printf.sprintf "%d entries [%s]" (List.length filtered) range_desc)
 
 (* Time range helpers *)
 let window_seconds tr =
@@ -101,26 +131,6 @@ let narrow_range tr =
     | Some e -> Ptime.sub_span e span
   in
   { start_; end_ }
-
-let format_time_range = function
-  | None -> "all time"
-  | Some tr ->
-    let date t = let ((_y, mo, d), _) = Ptime.to_date_time t in (mo, d) in
-    let time t = let (_, ((hh, mm, ss), _)) = Ptime.to_date_time t in
-      Printf.sprintf "%02d:%02d:%02d" hh mm ss in
-    let fmt_date (mo, d) = Printf.sprintf "%02d-%02d" mo d in
-    let start_t = time tr.start_ in
-    match tr.end_ with
-    | None ->
-      Printf.sprintf "%s: %s -> now" (fmt_date (date tr.start_)) start_t
-    | Some e ->
-      let sd = date tr.start_ in
-      let ed = date e in
-      if sd = ed then
-        Printf.sprintf "%s: %s -> %s" (fmt_date sd) start_t (time e)
-      else
-        Printf.sprintf "%s %s -> %s %s"
-          (fmt_date sd) start_t (fmt_date ed) (time e)
 
 (* Handle keyboard input *)
 let handle_key model key =
@@ -331,21 +341,25 @@ let render model =
   let sidebar_width = min 15 (w / 5) in
   let main_width = w - sidebar_width - 1 in
 
+  let status_height = 1 in
   let search_height = 1 in
   let time_bar_height = 1 in
   let detail_height = if Detail.is_expanded model.detail then min 10 (h / 3) else 0 in
   let progress_height = if model.progress.tasks = [] then 0 else 1 in
-  let timeline_height = max 1 (h - search_height - time_bar_height - detail_height
-    - progress_height - 2) in
+  let timeline_height = max 1 (h - status_height - search_height - time_bar_height
+    - detail_height - progress_height - 2) in
 
   let terms = Weft_search.all_terms model.search in
+
+  (* Status bar *)
+  let status_img = Status.render model.status ~width:w in
 
   let search_img = Search_bar.render model.search_bar ~width:w in
 
   (* Time range bar *)
   let time_str = format_time_range model.time_range in
   let time_bar = I.string A.(fg lightcyan)
-    (Printf.sprintf " [%s]  </>:shift  -/+:zoom  r:reset" time_str) in
+    (Printf.sprintf " [%s]  </>:shift  -/+:zoom  r:reset  ?:help" time_str) in
   let time_bar = I.hsnap ~align:`Left w time_bar in
 
   let sep = Theme.hline w in
@@ -370,6 +384,7 @@ let render model =
     ~width:w ~height:detail_height in
 
   let base = I.vcat ([
+    status_img;
     search_img;
     time_bar;
     sep;
@@ -427,3 +442,4 @@ module Detail = Detail
 module Progress = Progress
 module Help = Help
 module Heatmap = Heatmap
+module Status = Status
