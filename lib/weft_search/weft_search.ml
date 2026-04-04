@@ -6,6 +6,7 @@ type source_adapter = {
   format_config : format_config option;
   pipeline : Weft_middleware.Pipeline.t option;
   has_multiline : bool;
+  ssh : Weft_connection.Ssh_control.t option;
 }
 
 type t = {
@@ -16,7 +17,8 @@ type t = {
   mutable tail_cancel : bool Atomic.t option;
 }
 
-let create ~cache ~sources ~formats ~general =
+let create ~cache ~sources ~formats ~general
+    ?(conn_pool : Weft_connection.Conn_pool.t option) () =
   let sources = List.map (fun (src : source_config) ->
     let fmt = Weft_config.resolve_format formats src.format in
     let pipeline = Option.map Weft_middleware.Pipeline.create fmt in
@@ -24,8 +26,15 @@ let create ~cache ~sources ~formats ~general =
       | Some f -> Option.is_some f.multiline
       | None -> false
     in
+    let ssh = match conn_pool with
+      | Some pool ->
+        (match Weft_connection.Conn_pool.get_connection pool src.name with
+         | Some conn -> conn.ssh
+         | None -> None)
+      | None -> None
+    in
     { name = src.name; config = src; format_config = fmt;
-      pipeline; has_multiline }
+      pipeline; has_multiline; ssh }
   ) sources in
   {
     term_manager = Term_manager.create ();
@@ -57,6 +66,33 @@ let read_file_lines path =
     Printf.eprintf "Warning: could not read %s: %s\n" path msg;
     []
 
+(* Fetch a remote file via SSH and return its contents *)
+let fetch_remote_file ssh path =
+  try
+    let data = Weft_connection.Ssh_control.run_command ssh ["cat"; path] in
+    Some data
+  with Failure msg ->
+    Printf.eprintf "Warning: could not fetch remote %s: %s\n" path msg;
+    None
+
+(* Fetch and decompress a remote archive *)
+let fetch_remote_archive ssh path =
+  let cmd = match Weft_source.Archive.decompressor_for path with
+    | Some decomp -> decomp
+    | None -> "cat"
+  in
+  try
+    let data = Weft_connection.Ssh_control.run_command ssh [cmd; path] in
+    Some data
+  with Failure msg ->
+    Printf.eprintf "Warning: could not fetch remote archive %s: %s\n" path msg;
+    None
+
+(* Discover remote archives via SSH *)
+let discover_remote_archives ssh path =
+  Weft_source.Archive.discover_remote ~ssh ~path
+  |> Weft_source.Archive.sort_by_mtime
+
 (* Process raw lines through a pipeline *)
 let process_through_pipeline pipeline ~source lines =
   match pipeline with
@@ -65,89 +101,126 @@ let process_through_pipeline pipeline ~source lines =
       if String.length line = 0 then None
       else Some {
         timestamp = Ptime_clock.now ();
-        raw = line;
-        source;
-        terms = [];
-        metadata = [];
+        raw = line; source;
+        terms = []; metadata = [];
       }
     ) lines
   | Some pl ->
     Weft_middleware.Pipeline.process_lines pl ~source lines
 
-(* Discover and cache archives for a source *)
-let discover_and_cache_archives adapter cache =
+(* Cache raw string data as a segment *)
+let cache_string_data cache ~source_name ~origin data =
+  if String.length data = 0 then ()
+  else begin
+    let tmp = Filename.temp_file "weft_remote_" ".log" in
+    (try
+       let oc = open_out tmp in
+       output_string oc data;
+       close_out oc;
+       ignore (Weft_cache.cache_file cache ~source_name ~origin ~path:tmp)
+     with Sys_error msg ->
+       Printf.eprintf "Warning: could not cache %s: %s\n" origin msg);
+    (try Sys.remove tmp
+     with Sys_error msg ->
+       Printf.eprintf "Warning: could not remove temp %s: %s\n" tmp msg)
+  end
+
+(* Discover and cache archives for a local source *)
+let discover_and_cache_local_archives adapter cache =
   match adapter.config.path with
   | None -> ()
   | Some path ->
     let archives = Weft_source.Archive.discover_local ~path
       |> Weft_source.Archive.sort_by_mtime in
     if archives <> [] then begin
-      (* Update known archives in manifest *)
       Weft_cache.update_archives cache ~source_name:adapter.name archives;
-      (* Cache each archive that isn't already cached *)
       List.iter (fun (archive : archive_info) ->
-        let archive_origin = Filename.basename archive.remote_path in
-        (* Check if we already have a segment for this archive *)
-        let already_cached = match Weft_cache.get_manifest cache adapter.name with
+        let origin = Filename.basename archive.remote_path in
+        let already = match Weft_cache.get_manifest cache adapter.name with
           | None -> false
-          | Some m ->
-            List.exists (fun (seg : segment) ->
-              seg.origin = archive_origin
-            ) m.segments
+          | Some m -> List.exists (fun (s : segment) -> s.origin = origin) m.segments
         in
-        if not already_cached then begin
-          (* Decompress if needed, then cache *)
+        if not already then begin
           if Weft_source.Archive.is_compressed archive.remote_path then begin
             match Weft_source.Archive.decompressor_for archive.remote_path with
-            | Some decomp_cmd ->
-              (* Decompress to a temp file, then cache it *)
+            | Some cmd ->
               let tmp = Filename.temp_file "weft_archive_" ".log" in
               let ret = Sys.command
-                (Printf.sprintf "%s '%s' > '%s' 2>/dev/null"
-                   decomp_cmd archive.remote_path tmp) in
-              if ret = 0 then begin
-                ignore (Weft_cache.cache_file cache
-                  ~source_name:adapter.name
-                  ~origin:archive_origin
-                  ~path:tmp)
-              end;
+                (Printf.sprintf "%s '%s' > '%s' 2>/dev/null" cmd archive.remote_path tmp) in
+              if ret = 0 then
+                ignore (Weft_cache.cache_file cache ~source_name:adapter.name ~origin ~path:tmp);
               (try Sys.remove tmp
                with Sys_error msg ->
-                 Printf.eprintf "Warning: could not remove temp file %s: %s\n"
-                   tmp msg)
+                 Printf.eprintf "Warning: could not remove temp %s: %s\n" tmp msg)
             | None -> ()
-          end else begin
-            (* Uncompressed archive — cache directly *)
-            ignore (Weft_cache.cache_file cache
-              ~source_name:adapter.name
-              ~origin:archive_origin
+          end else
+            ignore (Weft_cache.cache_file cache ~source_name:adapter.name ~origin
               ~path:archive.remote_path)
-          end
         end
       ) archives
     end
 
-(* Read lines for a source — check cache first, populate if needed.
-   Also discovers and caches any rotated archives. *)
+(* Discover and cache archives for a remote source *)
+let discover_and_cache_remote_archives adapter cache ssh =
+  match adapter.config.path with
+  | None -> ()
+  | Some path ->
+    let archives = discover_remote_archives ssh path in
+    if archives <> [] then begin
+      Weft_cache.update_archives cache ~source_name:adapter.name archives;
+      List.iter (fun (archive : archive_info) ->
+        let origin = Filename.basename archive.remote_path in
+        let already = match Weft_cache.get_manifest cache adapter.name with
+          | None -> false
+          | Some m -> List.exists (fun (s : segment) -> s.origin = origin) m.segments
+        in
+        if not already then begin
+          match fetch_remote_archive ssh archive.remote_path with
+          | Some data ->
+            cache_string_data cache ~source_name:adapter.name ~origin data
+          | None -> ()
+        end
+      ) archives
+    end
+
+(* Read lines for a source — check cache first, fetch if needed *)
 let read_source_lines adapter cache =
   if Weft_cache.is_cached cache ~source_name:adapter.name then
     Weft_cache.read_cached_lines cache ~source_name:adapter.name
   else begin
-    (* Cache the active file *)
-    (match adapter.config.path with
-     | Some path when Sys.file_exists path ->
-       ignore (Weft_cache.cache_file cache
-         ~source_name:adapter.name
-         ~origin:(Filename.basename path)
-         ~path)
-     | _ -> ());
-    (* Discover and cache archives *)
-    discover_and_cache_archives adapter cache;
-    (* Read everything from cache *)
+    (match adapter.config.source_type with
+     | File ->
+       (* Local file — read directly *)
+       (match adapter.config.path with
+        | Some path when Sys.file_exists path ->
+          ignore (Weft_cache.cache_file cache
+            ~source_name:adapter.name
+            ~origin:(Filename.basename path) ~path)
+        | _ -> ());
+       discover_and_cache_local_archives adapter cache
+
+     | Remote ->
+       (* Remote file — fetch via SSH *)
+       (match adapter.ssh, adapter.config.path with
+        | Some ssh, Some path ->
+          Printf.eprintf "Fetching %s from %s...\n%!"
+            path (Option.value ~default:"remote" adapter.config.transport);
+          (match fetch_remote_file ssh path with
+           | Some data ->
+             cache_string_data cache ~source_name:adapter.name
+               ~origin:(Filename.basename path) data
+           | None -> ());
+          discover_and_cache_remote_archives adapter cache ssh
+        | _ ->
+          Printf.eprintf "Warning: remote source %s has no SSH connection\n"
+            adapter.name)
+
+     | Directory | Loki -> ()
+    );
     Weft_cache.read_cached_lines cache ~source_name:adapter.name
   end
 
-(* Batch search for a single source — reads file, runs pipeline, filters *)
+(* Batch search for a single source *)
 let search_source t adapter ~terms ~time_range =
   let lines = read_source_lines adapter t.cache in
   if lines = [] then Seq.empty
@@ -173,7 +246,6 @@ let search_source t adapter ~terms ~time_range =
     List.to_seq in_range
   end
 
-(* Full batch search across all sources *)
 let search t ~time_range =
   let terms = Term_manager.enabled_terms t.term_manager in
   if terms = [] then Seq.empty
@@ -183,7 +255,6 @@ let search t ~time_range =
     ) t.sources in
     Weft_merge.Batch_merge.merge_with_dedup streams
 
-(* Load all entries without term filtering *)
 let load_all t =
   let streams = List.map (fun adapter ->
     let lines = read_source_lines adapter t.cache in
@@ -195,8 +266,7 @@ let load_all t =
 let add_term t term_str =
   match Term_manager.add_term t.term_manager term_str with
   | None -> None
-  | Some search_term ->
-    Some search_term
+  | Some search_term -> Some search_term
 
 let remove_term t term_str =
   Term_manager.remove_term t.term_manager term_str

@@ -152,7 +152,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
   let search = Weft_search.create ~cache
     ~sources:sources_config.sources
     ~formats:formats_config
-    ~general:sources_config.general in
+    ~general:sources_config.general
+    ~conn_pool:pool () in
   List.iter (fun t -> ignore (Weft_search.add_term search t)) initial_terms;
 
   let terms_ref = ref initial_terms in
@@ -292,20 +293,36 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms =
     Weft_connection.Conn_pool.close_all pool
   )
 
-(* Run in dump mode *)
-let run_dump ~env ~formats_config ~sources_config ~initial_terms
-    ~limit ~json =
+(* Common initialization for dump/live modes *)
+let init_runtime ~env ~formats_config ~sources_config ~initial_terms =
   let fs = Eio.Stdenv.fs env in
+  let proc = Eio.Stdenv.process_mgr env in
   let cache = Weft_cache.create ~fs sources_config.cache in
   List.iter (fun (src : source_config) ->
     ignore (Weft_cache.init_source cache ~source_name:src.name ~format:src.format)
   ) sources_config.sources;
-
+  let pool = Weft_connection.Conn_pool.create ~limits:sources_config.limits in
+  List.iter (fun src -> Weft_connection.Conn_pool.add_source pool src)
+    sources_config.sources;
+  List.iter (fun (src : source_config) ->
+    match Weft_connection.Conn_pool.connect_source proc pool src.name with
+    | Ok () -> ()
+    | Error e -> Printf.eprintf "Warning: connect %s: %s\n" src.name e
+  ) sources_config.sources;
   let search = Weft_search.create ~cache
     ~sources:sources_config.sources
     ~formats:formats_config
-    ~general:sources_config.general in
+    ~general:sources_config.general
+    ~conn_pool:pool () in
   List.iter (fun t -> ignore (Weft_search.add_term search t)) initial_terms;
+  (cache, pool, search)
+
+(* Run in dump mode *)
+let run_dump ~env ~formats_config ~sources_config ~initial_terms
+    ~limit ~json =
+  let (cache, pool, search) =
+    init_runtime ~env ~formats_config ~sources_config ~initial_terms in
+  ignore pool;
 
   let has_terms = initial_terms <> [] in
   let entries = if has_terms then
@@ -335,16 +352,8 @@ let run_dump ~env ~formats_config ~sources_config ~initial_terms
 (* Run in live/follow mode — like dump but keeps watching for new entries *)
 let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
   let fs = Eio.Stdenv.fs env in
-  let cache = Weft_cache.create ~fs sources_config.cache in
-  List.iter (fun (src : source_config) ->
-    ignore (Weft_cache.init_source cache ~source_name:src.name ~format:src.format)
-  ) sources_config.sources;
-
-  let search = Weft_search.create ~cache
-    ~sources:sources_config.sources
-    ~formats:formats_config
-    ~general:sources_config.general in
-  List.iter (fun t -> ignore (Weft_search.add_term search t)) initial_terms;
+  let (_cache, _pool, search) =
+    init_runtime ~env ~formats_config ~sources_config ~initial_terms in
 
   (* Print existing entries first *)
   let has_terms = initial_terms <> [] in

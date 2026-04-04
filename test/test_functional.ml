@@ -48,7 +48,7 @@ let run_search ~formats_toml ~sources_toml ~terms =
     ignore (Weft_cache.init_source cache ~source_name:src.name ~format:src.format)
   ) sources.sources;
   let search = Weft_search.create ~cache
-    ~sources:sources.sources ~formats ~general:sources.general in
+    ~sources:sources.sources ~formats ~general:sources.general () in
   List.iter (fun t -> ignore (Weft_search.add_term search t)) terms;
   let entries = if terms = [] then
     Weft_search.load_all search
@@ -566,7 +566,7 @@ format = "s"
     ignore (Weft_cache.init_source cache ~source_name:src.name ~format:src.format)
   ) sources.sources;
   let search = Weft_search.create ~cache
-    ~sources:sources.sources ~formats ~general:sources.general in
+    ~sources:sources.sources ~formats ~general:sources.general () in
   (* Add term *)
   let t1 = Weft_search.add_term search "foo" in
   Alcotest.(check bool) "add foo" true (t1 <> None);
