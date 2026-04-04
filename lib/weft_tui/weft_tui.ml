@@ -3,6 +3,8 @@ open Weft_types
 
 type focus = Sources | Terms | Timeline
 
+type overlay = None_ | Help | Heatmap
+
 type model = {
   search_bar : Search_bar.t;
   timeline : Timeline.t;
@@ -15,6 +17,7 @@ type model = {
   mutable width : int;
   mutable height : int;
   mutable time_range : time_range option;
+  mutable overlay : overlay;
 }
 
 let create ~search ~time_range =
@@ -30,6 +33,7 @@ let create ~search ~time_range =
     width = 80;
     height = 24;
     time_range;
+    overlay = None_;
   }
 
 (* Re-run search and update timeline *)
@@ -116,6 +120,61 @@ let format_time_range = function
 
 (* Handle keyboard input *)
 let handle_key model key =
+  (* Overlays consume all keys except their dismiss key *)
+  if model.overlay <> None_ then begin
+    (match key with
+     | `Escape | `ASCII '?' ->
+       model.overlay <- None_
+     | `ASCII 'H' | `ASCII 'h' ->
+       if model.overlay = Heatmap then model.overlay <- None_
+       else model.overlay <- Heatmap
+     | `ASCII 'q' -> model.quit <- true
+     (* Allow time navigation while in heatmap *)
+     | `ASCII '<' | `ASCII ',' when model.overlay = Heatmap ->
+       let tr = match model.time_range with
+         | Some tr -> tr
+         | None ->
+           let now = Ptime_clock.now () in
+           { start_ = (match Ptime.sub_span now (Ptime.Span.of_int_s 3600) with
+                        | Some t -> t | None -> now);
+             end_ = Some now }
+       in
+       let half = window_seconds tr / 2 in
+       model.time_range <- Some (shift_range tr (-half));
+       refresh_search model
+     | `ASCII '>' | `ASCII '.' when model.overlay = Heatmap ->
+       (match model.time_range with
+        | Some tr ->
+          let half = window_seconds tr / 2 in
+          model.time_range <- Some (shift_range tr half);
+          refresh_search model
+        | None -> ())
+     | `ASCII '-' | `ASCII '_' when model.overlay = Heatmap ->
+       (match model.time_range with
+        | Some tr ->
+          let narrowed = narrow_range tr in
+          if window_seconds narrowed > 60 then begin
+            model.time_range <- Some narrowed;
+            refresh_search model
+          end
+        | None ->
+          let now = Ptime_clock.now () in
+          model.time_range <- Some {
+            start_ = (match Ptime.sub_span now (Ptime.Span.of_int_s 1800) with
+                       | Some t -> t | None -> now);
+            end_ = Some now };
+          refresh_search model)
+     | `ASCII '+' | `ASCII '=' when model.overlay = Heatmap ->
+       (match model.time_range with
+        | Some tr ->
+          model.time_range <- Some (widen_range tr);
+          refresh_search model
+        | None -> ())
+     | `ASCII 'r' when model.overlay = Heatmap ->
+       model.time_range <- None;
+       refresh_search model
+     | _ -> ())
+  end else
   if Search_bar.is_active model.search_bar then begin
     match key with
     | `Escape ->
@@ -231,6 +290,10 @@ let handle_key model key =
       (* Reset to full range *)
       model.time_range <- None;
       refresh_search model
+    | `ASCII '?' ->
+      model.overlay <- Help
+    | `ASCII 'H' ->
+      model.overlay <- (if model.overlay = Heatmap then None_ else Heatmap)
     | _ -> ()
   end
 
@@ -280,13 +343,27 @@ let render model =
     ~entry:(Timeline.selected_entry model.timeline)
     ~width:w ~height:detail_height in
 
-  I.vcat ([
+  let base = I.vcat ([
     search_img;
     time_bar;
     sep;
     main_row;
   ] @ (if progress_height > 0 then [progress_img] else [])
     @ (if detail_height > 0 then [detail_sep; detail_img] else []))
+  in
+  (* Render overlay on top if active *)
+  match model.overlay with
+  | None_ -> base
+  | Help ->
+    (* Help overlays the main content *)
+    let help_img = Help.render ~width:w ~height:h in
+    I.(help_img </> base)
+  | Heatmap ->
+    let sources = model.sidebar.sources in
+    let heatmap_img = Heatmap.render
+      ~entries:model.timeline.entries ~sources
+      ~width:w ~height:h in
+    heatmap_img
 
 let run_ui model term =
   let img = ref (render model) in
@@ -322,3 +399,5 @@ module Timeline = Timeline
 module Sidebar = Sidebar
 module Detail = Detail
 module Progress = Progress
+module Help = Help
+module Heatmap = Heatmap
