@@ -7,3 +7,7 @@
  (name gen_logs)
  (public_name weft-gen-logs)
  (libraries unix))
+
+(executable
+ (name debug_keys)
+ (libraries notty notty.unix unix))

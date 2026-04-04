@@ -26,16 +26,23 @@ let render t ~entry ~width ~height =
         I.string A.empty entry.source;
       ] in
       let raw_label = I.string Theme.detail_label_attr "Raw: " in
-      (* Wrap raw text to width *)
+      (* Split on newlines, sanitize control chars, then wrap to width *)
+      let sanitize s = String.map (fun c ->
+        if Char.code c < 0x20 && c <> ' ' then ' ' else c
+      ) s in
       let raw_lines =
         let max_line = width - 2 in
-        let rec wrap s acc =
-          if String.length s <= max_line then List.rev (s :: acc)
-          else
-            let chunk = String.sub s 0 max_line in
-            wrap (String.sub s max_line (String.length s - max_line)) (chunk :: acc)
-        in
-        wrap entry.raw []
+        let source_lines = String.split_on_char '\n' entry.raw in
+        List.concat_map (fun line ->
+          let line = sanitize line in
+          let rec wrap s acc =
+            if String.length s <= max_line then List.rev (s :: acc)
+            else
+              let chunk = String.sub s 0 max_line in
+              wrap (String.sub s max_line (String.length s - max_line)) (chunk :: acc)
+          in
+          wrap line []
+        ) source_lines
       in
       let raw_imgs = List.map (fun l -> I.string A.empty ("  " ^ l)) raw_lines in
 

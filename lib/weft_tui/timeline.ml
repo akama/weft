@@ -63,9 +63,17 @@ let render_entry (entry : log_entry) ~width ~is_selected ~term_list =
   let prefix = Printf.sprintf "%s [%s] " ts_str src_str in
   let prefix_len = String.length prefix in
   let raw_available = max 0 (width - prefix_len - 1) in
-  let raw_display = if String.length entry.raw > raw_available then
-    String.sub entry.raw 0 raw_available
-  else entry.raw in
+  (* Show only first line for multiline entries; replace control chars *)
+  let first_line = match String.index_opt entry.raw '\n' with
+    | Some i -> String.sub entry.raw 0 i ^ " ..."
+    | None -> entry.raw
+  in
+  let sanitized = String.map (fun c ->
+    if Char.code c < 0x20 && c <> ' ' then ' ' else c
+  ) first_line in
+  let raw_display = if String.length sanitized > raw_available then
+    String.sub sanitized 0 raw_available
+  else sanitized in
 
   let base_attr = if is_selected then Theme.selected_attr
     else Notty.A.empty in
