@@ -15,6 +15,8 @@ let render ~width ~height =
     (A.empty, "  d              Delete selected term");
     (A.empty, "  s              Toggle selected source on/off");
     (A.empty, "  t              Toggle selected term visibility");
+    (A.empty, "  i              Isolate term (disable all others)");
+    (A.empty, "  I              Restore all terms (enable all)");
     (A.empty, "");
     (A.(fg lightyellow), "Time Range");
     (A.empty, "  < , >          Shift window earlier / later");

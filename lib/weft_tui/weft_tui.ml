@@ -284,6 +284,28 @@ let handle_key model key =
       (* Reset to full range *)
       model.time_range <- None;
       refresh_search model
+    | `ASCII 'i' ->
+      (* Isolate: disable all terms except one *)
+      let term_to_isolate = match model.focus with
+        | Terms ->
+          (* Use the selected term in the sidebar *)
+          let terms = Weft_search.all_terms model.search in
+          Sidebar.selected_term_name model.sidebar ~terms
+        | Timeline | Sources ->
+          (* Use the first matched term of the selected entry *)
+          (match Timeline.selected_entry model.timeline with
+           | Some entry when entry.terms <> [] -> Some (List.hd entry.terms)
+           | _ -> None)
+      in
+      (match term_to_isolate with
+       | Some term_name ->
+         Weft_search.isolate_term model.search term_name;
+         refresh_search model
+       | None -> ())
+    | `ASCII 'I' ->
+      (* Restore: enable all terms *)
+      Weft_search.enable_all_terms model.search;
+      refresh_search model
     | `ASCII '?' ->
       model.overlay <- Help
     | `ASCII 'H' ->
