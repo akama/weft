@@ -32,7 +32,15 @@ let append_entry t (entry : log_entry) =
   let old_len = Array.length t.entries in
   let new_arr = Array.make (old_len + 1) entry in
   Array.blit t.entries 0 new_arr 0 old_len;
-  t.entries <- new_arr
+  t.entries <- new_arr;
+  (* In Desc mode, the display is reversed — adding to the end of the
+     array shifts all display indices by 1. Compensate so the user keeps
+     looking at the same entry. *)
+  match t.order with
+  | Desc when old_len > 0 ->
+    t.selected <- t.selected + 1;
+    t.scroll_offset <- t.scroll_offset + 1
+  | _ -> ()
 
 (* Map display index to array index based on sort order *)
 let to_array_idx t display_idx =
