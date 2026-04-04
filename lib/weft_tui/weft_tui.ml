@@ -106,13 +106,8 @@ let format_time_range = function
   | None -> "all time"
   | Some tr ->
     let fmt t =
-      let ((y, mo, d), ((hh, mm, ss), _)) = Ptime.to_date_time t in
-      let now = Ptime_clock.now () in
-      let ((ty, tmo, td), _) = Ptime.to_date_time now in
-      if (y, mo, d) = (ty, tmo, td) then
-        Printf.sprintf "%02d:%02d:%02d" hh mm ss
-      else
-        Printf.sprintf "%02d-%02d %02d:%02d:%02d" mo d hh mm ss
+      let ((_y, mo, d), ((hh, mm, ss), _)) = Ptime.to_date_time t in
+      Printf.sprintf "%02d-%02d %02d:%02d:%02d" mo d hh mm ss
     in
     let start_s = fmt tr.start_ in
     match tr.end_ with
