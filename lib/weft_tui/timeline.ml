@@ -103,17 +103,24 @@ let append_entry t (entry : log_entry) =
   let search_pending = !freeze_auto_follow in
   match t.order with
   | Asc ->
+    (* Auto-follow only when at live edge and not frozen *)
     let was_at_bottom = t.selected >= old_len - 1 in
     if (was_at_bottom || old_len = 0) && not search_pending then begin
       t.selected <- old_len;
       t.scroll_offset <- max 0 (old_len + 1 - t.visible_height)
     end
+    (* Otherwise: Asc appends to end, display indices don't shift *)
   | Desc ->
-    if t.selected = 0 && t.scroll_offset = 0 && not search_pending then
-      ()  (* stay at top — auto-follow *)
-    else if old_len > 0 then begin
+    (* Desc: new entry at array end = display index 0. All existing
+       display indices shift by +1. Must always compensate. *)
+    if old_len > 0 then begin
       t.selected <- t.selected + 1;
       t.scroll_offset <- t.scroll_offset + 1
+    end;
+    (* Auto-follow to top only when at live edge and not frozen *)
+    if t.selected = 1 && t.scroll_offset = 1 && not search_pending then begin
+      t.selected <- 0;
+      t.scroll_offset <- 0
     end
 
 (* Map display index to array index based on sort order *)
