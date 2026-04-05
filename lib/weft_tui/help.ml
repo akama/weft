@@ -32,6 +32,7 @@ let render ~width ~height =
     (A.empty, "  o              Toggle sort order (asc/desc)");
     (A.empty, "  ?              Toggle this help screen");
     (A.empty, "  H              Toggle time heatmap overview");
+    (A.empty, "  L              Status log (scrollable history)");
     (A.empty, "");
     (A.(fg lightblack), "Press ? or Escape to close");
   ] in
