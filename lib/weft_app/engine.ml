@@ -590,6 +590,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       (* Dispatch pending search requests *)
       if !(Weft_tui.needs_refresh) then begin
         Weft_tui.needs_refresh := false;
+        Weft_tui.Timeline.freeze_auto_follow := true;
         let params = Weft_tui.snapshot_params model in
         ignore (Eio.Stream.take_nonblocking search_requests);
         Eio.Stream.add search_requests params
@@ -598,6 +599,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       (* Pick up completed search results *)
       (match Eio.Stream.take_nonblocking search_results with
        | Some results ->
+         Weft_tui.Timeline.freeze_auto_follow := false;
          Weft_tui.Timeline.set_entries model.timeline results;
          update_cache_stats ();
          let range_desc = Weft_tui.format_time_range model.time_range in
