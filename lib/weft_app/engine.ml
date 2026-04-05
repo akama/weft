@@ -155,6 +155,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   let tail_dedup = Weft_merge.Dedup.create ~max_size:50000 () in
 
   let fs = Eio.Stdenv.fs env in
+  (* Collect tail buffer flush functions so we can flush before search *)
+  let tail_flushers : (unit -> unit) list ref = ref [] in
 
   Fun.protect ~finally:(fun () ->
     Atomic.set tail_cancel true;
@@ -214,6 +216,9 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
             !active_seg data)
         end
       in
+
+      (* Register this source's flush for pre-search cache sync *)
+      tail_flushers := flush_cache_buf :: !tail_flushers;
 
       let seal_active_seg () =
         flush_cache_buf ();
@@ -591,6 +596,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       if !(Weft_tui.needs_refresh) then begin
         Weft_tui.needs_refresh := false;
         Weft_tui.Timeline.freeze_auto_follow := true;
+        (* Flush all tail buffers to cache so search finds recent data *)
+        List.iter (fun f -> f ()) !tail_flushers;
         let params = Weft_tui.snapshot_params model in
         ignore (Eio.Stream.take_nonblocking search_requests);
         Eio.Stream.add search_requests params
