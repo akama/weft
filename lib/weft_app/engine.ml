@@ -201,19 +201,28 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       ) pipeline in
 
       (* Active cache segment for this source's tail data (design §17).
-         Mutable so rotation can seal the old and swap in a new one. *)
-      let active_seg = ref (Weft_cache.new_segment cache
-        ~source_name:src.name ~origin:"tail") in
+         Created lazily on first flush to avoid empty segment files. *)
+      let active_seg : Weft_types.segment option ref = ref None in
       let cache_buf = Buffer.create 4096 in
       let cache_line_count = ref 0 in
       let cache_flush_interval = 50 in
 
+      let ensure_seg () =
+        match !active_seg with
+        | Some s -> s
+        | None ->
+          let s = Weft_cache.new_segment cache
+            ~source_name:src.name ~origin:"tail" in
+          active_seg := Some s; s
+      in
+
       let flush_cache_buf () =
         if Buffer.length cache_buf > 0 then begin
+          let seg = ensure_seg () in
           let data = Buffer.contents cache_buf in
           Buffer.clear cache_buf;
           ignore (Weft_cache.store_data cache ~source_name:src.name
-            !active_seg data)
+            seg data)
         end
       in
 
@@ -222,14 +231,17 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
 
       let seal_active_seg () =
         flush_cache_buf ();
-        let end_time = Ptime_clock.now () in
-        ignore (Weft_cache.seal_segment cache
-          ~source_name:src.name !active_seg ~end_time)
+        match !active_seg with
+        | None -> ()  (* nothing to seal — no data was written *)
+        | Some seg ->
+          let end_time = Ptime_clock.now () in
+          ignore (Weft_cache.seal_segment cache
+            ~source_name:src.name seg ~end_time)
       in
 
-      let new_active_seg origin =
-        active_seg := Weft_cache.new_segment cache
-          ~source_name:src.name ~origin;
+      let new_active_seg _origin =
+        (* Reset — next flush will create a fresh segment lazily *)
+        active_seg := None;
         cache_line_count := 0
       in
 
