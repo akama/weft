@@ -349,7 +349,11 @@ let search_source ctx adapter ~terms ~(time_range : time_range option) =
            | Some end_t -> Ptime.is_earlier e.timestamp ~than:end_t)
         ) tagged
     in
-    List.to_seq in_range
+    (* Sort per-source to satisfy merge's sorted-input requirement.
+       Tail segments may have entries in arrival order, not timestamp order. *)
+    let sorted = List.sort (fun (a : log_entry) (b : log_entry) ->
+      Ptime.compare a.timestamp b.timestamp) in_range in
+    List.to_seq sorted
   end
 
 let search ctx ~time_range =
@@ -376,7 +380,10 @@ let load_all ?time_range ctx =
            | Some end_t -> Ptime.is_earlier e.timestamp ~than:end_t)
         ) entries
     in
-    (adapter.name, List.to_seq entries)
+    (* Sort per-source before merge — tail segments may not be in timestamp order *)
+    let sorted = List.sort (fun (a : log_entry) (b : log_entry) ->
+      Ptime.compare a.timestamp b.timestamp) entries in
+    (adapter.name, List.to_seq sorted)
   ) ctx.sources in
   Weft_merge.Batch_merge.merge streams
 
