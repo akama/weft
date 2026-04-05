@@ -17,6 +17,8 @@ let render ~width ~height =
     (A.empty, "  /              Add a search term");
     (A.empty, "  d              Delete selected term");
     (A.empty, "  s              Toggle selected source on/off");
+    (A.empty, "  x              Isolate source (disable all others)");
+    (A.empty, "  X              Restore all sources");
     (A.empty, "  t              Toggle selected term visibility");
     (A.empty, "  i              Isolate term (disable all others)");
     (A.empty, "  I              Restore all terms (enable all)");

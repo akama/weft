@@ -57,6 +57,17 @@ let toggle_selected_source t =
 let is_source_enabled t sid =
   not (List.mem sid t.disabled_sources)
 
+let isolate_selected_source t =
+  match List.nth_opt t.sources t.selected_source with
+  | None -> None
+  | Some (sid, _) ->
+    let all_sids = List.map fst t.sources in
+    t.disabled_sources <- List.filter (fun s -> s <> sid) all_sids;
+    Some sid
+
+let enable_all_sources t =
+  t.disabled_sources <- []
+
 let selected_term_name t ~(terms : search_term list) =
   List.nth_opt terms t.selected_term
   |> Option.map (fun (st : search_term) -> st.term)

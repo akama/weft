@@ -278,6 +278,13 @@ let handle_key model key =
       (match Sidebar.toggle_selected_source model.sidebar with
        | Some _sid -> request_refresh model
        | None -> ())
+    | `ASCII 'x' ->
+      (match Sidebar.isolate_selected_source model.sidebar with
+       | Some _sid -> request_refresh model
+       | None -> ())
+    | `ASCII 'X' ->
+      Sidebar.enable_all_sources model.sidebar;
+      request_refresh model
     | `ASCII 't' ->
       let terms = Weft_search.all_terms model.search in
       (match Sidebar.selected_term_name model.sidebar ~terms with
