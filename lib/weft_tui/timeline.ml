@@ -1,6 +1,9 @@
 open Notty
 open Weft_types
 
+(* Set to true when a search is in-flight to suppress auto-follow *)
+let freeze_auto_follow = ref false
+
 type sort_order = Asc | Desc
 
 type t = {
@@ -94,19 +97,20 @@ let append_entry t (entry : log_entry) =
   let new_arr = Array.make (old_len + 1) entry in
   Array.blit t.entries 0 new_arr 0 old_len;
   t.entries <- new_arr;
+  (* When a search is pending, don't auto-follow — the user initiated a
+     scope change and we need to preserve their position for set_entries.
+     search_pending is set externally by the engine before appending. *)
+  let search_pending = !freeze_auto_follow in
   match t.order with
   | Asc ->
-    (* Auto-follow if user was at or near the bottom (live edge) *)
     let was_at_bottom = t.selected >= old_len - 1 in
-    if was_at_bottom || old_len = 0 then begin
-      t.selected <- old_len;  (* select the new entry *)
+    if (was_at_bottom || old_len = 0) && not search_pending then begin
+      t.selected <- old_len;
       t.scroll_offset <- max 0 (old_len + 1 - t.visible_height)
     end
   | Desc ->
-    (* In Desc mode, display index 0 = newest. If user is at top (live
-       edge), keep them there. Otherwise compensate to hold position. *)
-    if t.selected = 0 && t.scroll_offset = 0 then
-      ()  (* stay at top — new entry appears as display index 0 *)
+    if t.selected = 0 && t.scroll_offset = 0 && not search_pending then
+      ()  (* stay at top — auto-follow *)
     else if old_len > 0 then begin
       t.selected <- t.selected + 1;
       t.scroll_offset <- t.scroll_offset + 1
