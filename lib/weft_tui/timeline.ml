@@ -16,9 +16,45 @@ let create () =
     visible_height = 20; order = Asc }
 
 let set_entries t entries =
+  (* Remember the currently selected entry so we can restore focus *)
+  let prev_entry =
+    let n = Array.length t.entries in
+    if n = 0 then None
+    else
+      let idx = match t.order with
+        | Asc -> t.selected
+        | Desc -> n - 1 - t.selected in
+      if idx >= 0 && idx < n then Some t.entries.(idx)
+      else None
+  in
   t.entries <- Array.of_list entries;
-  t.scroll_offset <- 0;
-  t.selected <- 0
+  (* Try to find the same entry in the new set *)
+  let restored = match prev_entry with
+    | None -> false
+    | Some prev ->
+      let n = Array.length t.entries in
+      let found = ref false in
+      for i = 0 to n - 1 do
+        if not !found then begin
+          let e = t.entries.(i) in
+          if Ptime.equal e.timestamp prev.timestamp
+             && e.source = prev.source then begin
+            (* Convert array index to display index *)
+            let display_idx = match t.order with
+              | Asc -> i
+              | Desc -> n - 1 - i in
+            t.selected <- display_idx;
+            t.scroll_offset <- max 0 (display_idx - t.visible_height / 2);
+            found := true
+          end
+        end
+      done;
+      !found
+  in
+  if not restored then begin
+    t.scroll_offset <- 0;
+    t.selected <- 0
+  end
 
 let toggle_order t =
   t.order <- (match t.order with Asc -> Desc | Desc -> Asc);
