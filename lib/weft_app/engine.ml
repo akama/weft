@@ -88,8 +88,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       let m = try int_of_string (Re.Group.get g 2) with Not_found -> 0 in
       let s = try int_of_string (Re.Group.get g 3) with Not_found -> 0 in
       let total = h * 3600 + m * 60 + s in
-      if total > 0 then total else 3600
-    | None -> 3600
+      if total > 0 then total else Weft_constants.default_time_range_sec
+    | None -> Weft_constants.default_time_range_sec
   in
 
   let model = Weft_tui.create ~search ~time_range
@@ -155,7 +155,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   let tail_entries : log_entry Eio.Stream.t =
     Eio.Stream.create 4096 in
   let tail_cancel = Atomic.make false in
-  let tail_dedup = Weft_merge.Dedup.create ~max_size:50000 () in
+  let tail_dedup = Weft_merge.Dedup.create
+    ~max_size:Weft_constants.tail_dedup_capacity () in
 
   let fs = Eio.Stdenv.fs env in
   (* Collect tail buffer flush functions so we can flush before search *)
@@ -208,7 +209,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
       let active_seg : Weft_types.segment option ref = ref None in
       let cache_buf = Buffer.create 4096 in
       let cache_line_count = ref 0 in
-      let cache_flush_interval = 50 in
+      let cache_flush_interval = Weft_constants.cache_flush_interval in
 
       let ensure_seg () =
         match !active_seg with
@@ -337,9 +338,13 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                        match Weft_source.Archive.decompressor_for archive.remote_path with
                        | Some cmd ->
                          let tmp = Filename.temp_file "weft_rotate_" ".log" in
+                         let shell_quote s =
+                           "'" ^ String.concat "'\\''"
+                             (String.split_on_char '\'' s) ^ "'" in
                          let ret = Sys.command
-                           (Printf.sprintf "%s '%s' > '%s' 2>/dev/null"
-                              cmd archive.remote_path tmp) in
+                           (Printf.sprintf "%s %s > %s 2>/dev/null"
+                              cmd (shell_quote archive.remote_path)
+                              (shell_quote tmp)) in
                          if ret = 0 then begin
                            ignore (Weft_cache.cache_file cache
                              ~source_name:src.name ~origin ~path:tmp);
@@ -378,11 +383,13 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                | Ok false -> false
                | Error `Timeout -> false
              in
+             let eio_sleep secs = Eio.Time.sleep clock secs in
              (try
                 Weft_source.Local_file.tail adapter ~terms:[]
                   ~emit:(fun entry -> emit_line src.name entry.raw)
                   ~cancel:tail_cancel ~on_rotation:rotation_cbs
-                  ~drain_timeout ~wait_readable:eio_wait_readable ()
+                  ~drain_timeout ~wait_readable:eio_wait_readable
+                  ~sleep:eio_sleep ()
               with exn ->
                 Weft_tui.Status.set model.status
                   (Printf.sprintf "Tail %s ended: %s" src.name
@@ -500,20 +507,18 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
          | _ -> ())
 
       | Loki ->
-        (* Loki: periodic poll every 5 seconds for new entries *)
         (match src.url with
          | Some _url ->
            Eio.Fiber.fork ~sw (fun () ->
              while not (Atomic.get tail_cancel) do
-               Eio.Time.sleep clock 5.0;
+               Eio.Time.sleep clock Weft_constants.loki_tui_poll_sec;
                if not (Atomic.get tail_cancel) then begin
-                 (* Re-query Loki for the last 10 seconds *)
                  let now = Ptime_clock.now () in
-                 let ten_sec_ago = match Ptime.sub_span now
-                   (Ptime.Span.of_int_s 10) with
+                 let lookback = match Ptime.sub_span now
+                   (Ptime.Span.of_int_s Weft_constants.loki_tail_lookback_sec) with
                    | Some t -> t | None -> now in
                  let params = {
-                   Weft_tui.sp_time_range = Some { start_ = ten_sec_ago;
+                   Weft_tui.sp_time_range = Some { start_ = lookback;
                                                     end_ = Some now };
                    sp_terms = !terms_ref;
                    sp_disabled = model.sidebar.disabled_sources;
@@ -608,10 +613,12 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                      end
                    ) entries_to_emit
                  in
+                 let eio_sleep secs = Eio.Time.sleep clock secs in
                  (try
                     Weft_source.Local_file.tail adapter ~terms:[]
                       ~emit:(fun entry -> sub_emit_line entry.raw)
-                      ~cancel:tail_cancel ~wait_readable:eio_wait ()
+                      ~cancel:tail_cancel ~wait_readable:eio_wait
+                      ~sleep:eio_sleep ()
                   with exn ->
                     Weft_tui.Status.set model.status
                       (Printf.sprintf "Tail %s: %s" sub_name

@@ -23,7 +23,8 @@ type model = {
   default_time_range_sec : int;
 }
 
-let create ~search ~time_range ?(default_time_range_sec = 3600) () =
+let create ~search ~time_range
+    ?(default_time_range_sec = Weft_constants.default_time_range_sec) () =
   {
     search_bar = Search_bar.create ();
     timeline = Timeline.create ();
@@ -76,7 +77,7 @@ let snapshot_params model = {
   sp_disabled = model.sidebar.disabled_sources;
 }
 
-let max_entries = 100000
+let max_entries = Weft_constants.max_display_entries
 
 (* Run a search with explicit parameters — thread-safe *)
 let do_search_with search params =

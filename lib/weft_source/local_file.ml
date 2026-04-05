@@ -42,7 +42,11 @@ let fetch_archive _t ~path ~dst =
      with exn -> Error (Printexc.to_string exn))
   | Some decomp_cmd ->
     (try
-       let cmd = Printf.sprintf "%s '%s' > '%s'" decomp_cmd path dst in
+       (* Use shell quoting to prevent injection via file paths *)
+       let shell_quote s =
+         "'" ^ String.concat "'\\''" (String.split_on_char '\'' s) ^ "'" in
+       let cmd = Printf.sprintf "%s %s > %s"
+         decomp_cmd (shell_quote path) (shell_quote dst) in
        let ret = Sys.command cmd in
        if ret = 0 then Ok ()
        else Error (Printf.sprintf "%s failed with exit code %d" decomp_cmd ret)
@@ -59,8 +63,9 @@ let search t ~terms ~time_range:_ =
   if terms = [] then Seq.empty
   else
     let pattern = build_grep_pattern terms in
-    let cmd = Printf.sprintf "grep -n '%s' '%s' 2>/dev/null" pattern t.path in
-    let ic = Unix.open_process_in cmd in
+    (* Use array-based process creation to avoid shell injection *)
+    let args = [| "grep"; "-n"; pattern; t.path |] in
+    let ic = Unix.open_process_args_in "grep" args in
     let source = t.config.name in
     let rec read_entries () =
       match (try Some (input_line ic) with End_of_file -> None) with
@@ -112,23 +117,17 @@ let default_wait_readable fd timeout =
   let ready, _, _ = Unix.select [fd] [] [] timeout in
   ready <> []
 
-(* Polling-based wait: check if file has grown (for non-inotify systems) *)
-let poll_wait_for_changes ~path ~last_size ~wait_readable_fn ~timeout =
-  (* Use a dummy fd approach — just sleep the timeout then check file size *)
-  ignore (wait_readable_fn Unix.stdin timeout);
-  try
-    let stat = Unix.stat path in
-    let new_size = Int64.of_int stat.Unix.st_size in
-    new_size > !last_size
-  with Unix.Unix_error _ -> false
+(* Default sleep: Unix.sleepf (blocks OS thread — use only outside Eio) *)
+let default_sleep secs = Unix.sleepf secs
 
 (* Tail using inotify (Linux) or polling fallback (macOS/other).
    wait_readable: function to poll fd readability. Pass an Eio-aware
    version when running inside Eio to avoid blocking the scheduler. *)
 let tail t ~terms ~emit ~cancel
     ?(on_rotation : rotation_callbacks option)
-    ?(drain_timeout = 5.0)
+    ?(drain_timeout = Weft_constants.default_drain_timeout)
     ?(wait_readable = default_wait_readable)
+    ?(sleep = default_sleep)
     () =
   let pattern = if terms = [] then None
     else Some (Re.compile (Re.Pcre.re (String.concat "|"
@@ -174,7 +173,7 @@ let tail t ~terms ~emit ~cancel
     let reopen () =
       close_in_noerr !ic;
       (* Wait briefly for the new file to appear *)
-      Unix.sleepf 0.1;
+      sleep Weft_constants.rotation_reopen_delay;
       if Sys.file_exists t.path then begin
         ic := open_in t.path;
         (* Re-add watch on new file *)
@@ -203,7 +202,7 @@ let tail t ~terms ~emit ~cancel
               let lines = read_new_lines !ic in
               if lines = [] then drained := false
               else List.iter emit_line lines;
-              if !drained then Unix.sleepf 0.1
+              if !drained then sleep Weft_constants.rotation_reopen_delay
             done;
             (* Seal old segment and start new *)
             (match on_rotation with
@@ -235,7 +234,9 @@ let tail_simple t ~terms ~emit ~cancel =
    Checks file size every poll_interval_ms. Less efficient but portable. *)
 let tail_poll t ~terms ~emit ~cancel
     ?(on_rotation : rotation_callbacks option)
-    ?(poll_interval_ms = 500) () =
+    ?(poll_interval_ms = Weft_constants.default_poll_interval_ms)
+    ?(sleep = default_sleep)
+    () =
   let pattern = if terms = [] then None
     else Some (Re.compile (Re.Pcre.re (String.concat "|"
       (List.map Re.Pcre.quote terms)))) in
@@ -273,7 +274,7 @@ let tail_poll t ~terms ~emit ~cancel
          close_in_noerr !ic;
          last_inode := new_inode;
          last_size := new_size;
-         Unix.sleepf 0.1;
+         sleep Weft_constants.rotation_reopen_delay;
          if Sys.file_exists t.path then begin
            (match on_rotation with
             | Some cb -> cb.on_new () | None -> ());
@@ -283,7 +284,7 @@ let tail_poll t ~terms ~emit ~cancel
          let lines = read_new_lines !ic in
          List.iter emit_line lines;
          last_size := Int64.of_int (pos_in !ic));
-      Unix.sleepf (float_of_int poll_interval_ms /. 1000.0)
+      sleep (float_of_int poll_interval_ms /. 1000.0)
     done
   ) ~finally:(fun () -> close_in_noerr !ic)
 
