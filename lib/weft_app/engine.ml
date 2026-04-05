@@ -131,8 +131,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   model.width <- w;
   model.height <- h;
 
-  (* Default to configured default_time_range when no range and no terms *)
-  if model.time_range = None && initial_terms = [] then begin
+  (* Default to configured default_time_range when no --since/--until provided *)
+  if model.time_range = None then begin
     let now = Ptime_clock.now () in
     let span = Ptime.Span.of_int_s default_time_range_sec in
     model.time_range <- Some {
