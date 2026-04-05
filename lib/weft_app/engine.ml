@@ -167,7 +167,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
     let catch_up_timeout =
       float_of_int sources_config.limits.catch_up_timeout_sec in
     Eio.Fiber.fork ~sw (fun () ->
-      while true do
+      (try while not (Atomic.get tail_cancel) do
         let params = Eio.Stream.take search_requests in
         let params = ref params in
         let rec drain () =
@@ -186,7 +186,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
            Weft_tui.Status.set model.status
              (Printf.sprintf "Search timed out after %ds"
                 sources_config.limits.catch_up_timeout_sec))
-      done
+      done with Eio.Cancel.Cancelled _ -> ())
     );
 
     (* Per-source tail fibers — watch for new entries and push to tail_entries.
@@ -641,8 +641,10 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
         running := handle_terminal_event ()
     done;
 
+    (* Signal all fibers to stop *)
+    Atomic.set tail_cancel true;
     Eio.Switch.fail sw Exit)
-    with Exit -> ())
+    with Exit | Eio.Cancel.Cancelled _ -> ())
 
 (* Run in dump mode *)
 let run_dump ~env ~formats_config ~sources_config ~initial_terms
