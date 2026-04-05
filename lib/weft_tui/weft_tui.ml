@@ -74,6 +74,8 @@ let snapshot_params model = {
   sp_disabled = model.sidebar.disabled_sources;
 }
 
+let max_entries = 100000
+
 (* Run a search with explicit parameters — thread-safe *)
 let do_search_with search params =
   let entries = if params.sp_terms <> [] then
@@ -81,10 +83,21 @@ let do_search_with search params =
   else
     Weft_search.load_all ?time_range:params.sp_time_range search
   in
-  let entry_list = List.of_seq (Seq.take 100000 entries) in
-  List.filter (fun (e : log_entry) ->
+  let entry_list = List.of_seq (Seq.take (max_entries + 1) entries) in
+  let truncated = List.length entry_list > max_entries in
+  let capped = if truncated then
+    (* Take last max_entries (newest) instead of first (oldest) to avoid
+       showing ancient data with a gap to recent tail entries *)
+    let len = List.length entry_list in
+    List.filteri (fun i _ -> i >= len - max_entries) entry_list
+  else entry_list in
+  let filtered = List.filter (fun (e : log_entry) ->
     not (List.mem e.source params.sp_disabled)
-  ) entry_list
+  ) capped in
+  if truncated then
+    Weft_search.report_status
+      (Printf.sprintf "Warning: results capped at %d entries — use a time range to see all data" max_entries);
+  filtered
 
 (* Synchronous refresh — used for initial load *)
 let refresh_search model =
