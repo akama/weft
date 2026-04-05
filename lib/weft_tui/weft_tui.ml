@@ -20,9 +20,10 @@ type model = {
   mutable time_range : time_range option;
   mutable overlay : overlay;
   mutable log_scroll : int;
+  default_time_range_sec : int;
 }
 
-let create ~search ~time_range =
+let create ~search ~time_range ?(default_time_range_sec = 3600) () =
   {
     search_bar = Search_bar.create ();
     timeline = Timeline.create ();
@@ -38,6 +39,7 @@ let create ~search ~time_range =
     time_range;
     overlay = None_;
     log_scroll = 0;
+    default_time_range_sec;
   }
 
 let format_time_range = function
@@ -243,7 +245,13 @@ let handle_key model key =
           request_refresh model
         | None -> ())
      | `ASCII 'r' when model.overlay = Heatmap ->
-       model.time_range <- None;
+       let now = Ptime_clock.now () in
+       let span = Ptime.Span.of_int_s model.default_time_range_sec in
+       model.time_range <- Some {
+         start_ = (match Ptime.sub_span now span with
+                   | Some t -> t | None -> now);
+         end_ = None;
+       };
        request_refresh model
      | _ -> ())
   end else
@@ -386,8 +394,15 @@ let handle_key model key =
          request_refresh model
        | None -> ())
     | `ASCII 'r' ->
-      (* Reset to full range *)
-      model.time_range <- None;
+      (* Reset to default time range *)
+      let now = Ptime_clock.now () in
+      let default_secs = model.default_time_range_sec in
+      let span = Ptime.Span.of_int_s default_secs in
+      model.time_range <- Some {
+        start_ = (match Ptime.sub_span now span with
+                  | Some t -> t | None -> now);
+        end_ = None;
+      };
       request_refresh model
     | `ASCII 'i' ->
       (* Isolate: disable all terms except one *)

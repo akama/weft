@@ -78,7 +78,22 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
   let clock = Eio.Stdenv.clock env in
   let terms_ref = ref initial_terms in
 
-  let model = Weft_tui.create ~search ~time_range in
+  (* Parse default time range from config *)
+  let default_time_range_sec =
+    let default_str = sources_config.general.default_time_range in
+    let re = Re.compile (Re.Pcre.re {|^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$|}) in
+    match Re.exec_opt re default_str with
+    | Some g ->
+      let h = try int_of_string (Re.Group.get g 1) with Not_found -> 0 in
+      let m = try int_of_string (Re.Group.get g 2) with Not_found -> 0 in
+      let s = try int_of_string (Re.Group.get g 3) with Not_found -> 0 in
+      let total = h * 3600 + m * 60 + s in
+      if total > 0 then total else 3600
+    | None -> 3600
+  in
+
+  let model = Weft_tui.create ~search ~time_range
+    ~default_time_range_sec () in
 
   (* Wire status callback *)
   Weft_search.set_status_callback (fun msg ->
@@ -118,20 +133,8 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
 
   (* Default to configured default_time_range when no range and no terms *)
   if model.time_range = None && initial_terms = [] then begin
-    let default_str = sources_config.general.default_time_range in
-    let seconds =
-      let re = Re.compile (Re.Pcre.re {|^(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?$|}) in
-      match Re.exec_opt re default_str with
-      | Some g ->
-        let h = try int_of_string (Re.Group.get g 1) with Not_found -> 0 in
-        let m = try int_of_string (Re.Group.get g 2) with Not_found -> 0 in
-        let s = try int_of_string (Re.Group.get g 3) with Not_found -> 0 in
-        let total = h * 3600 + m * 60 + s in
-        if total > 0 then total else 3600
-      | None -> 3600
-    in
     let now = Ptime_clock.now () in
-    let span = Ptime.Span.of_int_s seconds in
+    let span = Ptime.Span.of_int_s default_time_range_sec in
     model.time_range <- Some {
       start_ = (match Ptime.sub_span now span with
                 | Some t -> t | None -> now);
