@@ -33,7 +33,13 @@ let set_entries t entries =
     | None -> false
     | Some prev ->
       let n = Array.length t.entries in
+      (* Match by source + raw prefix (more robust than exact timestamp
+         since tail entries may have different timestamps than cached ones) *)
+      let prev_raw_prefix =
+        let len = min 80 (String.length prev.raw) in
+        String.sub prev.raw 0 len in
       let found = ref false in
+      (* First try exact timestamp + source match *)
       for i = 0 to n - 1 do
         if not !found then begin
           let e = t.entries.(i) in
@@ -49,6 +55,25 @@ let set_entries t entries =
           end
         end
       done;
+      (* Fallback: match by source + raw content prefix *)
+      if not !found then begin
+        for i = 0 to n - 1 do
+          if not !found then begin
+            let e = t.entries.(i) in
+            if e.source = prev.source then begin
+              let e_prefix = let len = min 80 (String.length e.raw) in
+                String.sub e.raw 0 len in
+              if e_prefix = prev_raw_prefix then begin
+                let display_idx = match t.order with
+                  | Asc -> i | Desc -> n - 1 - i in
+                t.selected <- display_idx;
+                t.scroll_offset <- max 0 (display_idx - t.visible_height / 2);
+                found := true
+              end
+            end
+          end
+        done
+      end;
       !found
   in
   if not restored then begin
