@@ -175,11 +175,13 @@ let close t =
   if t.active then begin
     let (base, _) = parse_transport t.transport_cmd in
     if base <> "tsh" then begin
-      (try
-         ignore (run_command t ["-O"; "exit"])
-       with Eio.Io _ | Failure _ ->
-         (* Best-effort cleanup — socket may already be gone *)
-         ())
+      (* Best-effort: ask ControlMaster to exit. Suppress errors —
+         socket may already be gone if the process was killed. *)
+      let ctl_path = t.control_path in
+      if Sys.file_exists ctl_path then
+        (try
+           ignore (run_command t ["-O"; "exit"])
+         with Eio.Io _ | Failure _ -> ())
     end;
     t.active <- false
   end
