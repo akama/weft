@@ -1,0 +1,3 @@
+(library
+ (name weft_constants)
+ (public_name weft.constants))

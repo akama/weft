@@ -87,6 +87,10 @@ let search t ~terms ~time_range:_ =
         t.config.name (Printexc.to_string e);
       Seq.empty
 
+(* Shell-quote a string for safe use in remote shell commands *)
+let shell_quote s =
+  "'" ^ String.concat "'\\''" (String.split_on_char '\'' s) ^ "'"
+
 let tail t ~terms ~emit ~cancel =
   let filter_pattern = if terms = [] then ""
     else String.concat "|" (List.map Re.Pcre.quote terms) in
@@ -97,8 +101,8 @@ let tail t ~terms ~emit ~cancel =
     ["tail"; "-F"; t.path]
   else
     ["sh"; "-c";
-     Printf.sprintf "tail -F '%s' | grep --line-buffered -E '%s'"
-       t.path filter_pattern]
+     Printf.sprintf "tail -F %s | grep --line-buffered -E %s"
+       (shell_quote t.path) (shell_quote filter_pattern)]
   in
   (try
      let output = Weft_connection.Ssh_control.run_command t.ssh tail_cmd in
@@ -125,8 +129,12 @@ let tail t ~terms ~emit ~cancel =
        end
      ) lines
    with
-   | Exit -> ()
-   | _ -> ())
+   | Failure msg ->
+     Printf.eprintf "Warning: remote tail failed for %s: %s\n"
+       t.config.name msg
+   | Eio.Io _ as e ->
+     Printf.eprintf "Warning: remote tail I/O error for %s: %s\n"
+       t.config.name (Printexc.to_string e))
 
 let close t =
   Weft_connection.Ssh_control.close t.ssh

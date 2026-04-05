@@ -66,8 +66,8 @@ let parse_loki_timestamp ns_str =
   with Failure _ -> None
 
 let read_body body =
-  let buf = Buffer.create 4096 in
-  let br = Eio.Buf_read.of_flow ~max_size:(10 * 1024 * 1024) body in
+  let buf = Buffer.create Weft_constants.default_read_buf_size in
+  let br = Eio.Buf_read.of_flow ~max_size:Weft_constants.loki_max_body_bytes body in
   (try
      while true do
        let chunk = Eio.Buf_read.line br in
@@ -132,8 +132,9 @@ let search t ~terms ~time_range =
     | _ -> format_time (Ptime_clock.now ())
   in
   let query_url = Printf.sprintf
-    "%s/loki/api/v1/query_range?query=%s&start=%s&end=%s&limit=5000&direction=forward"
-    t.base_url (Uri.pct_encode logql) start_time end_time in
+    "%s/loki/api/v1/query_range?query=%s&start=%s&end=%s&limit=%d&direction=forward"
+    t.base_url (Uri.pct_encode logql) start_time end_time
+    Weft_constants.loki_search_limit in
   let source = t.config.name in
   let headers = make_headers t in
   match t.make_client with
@@ -164,8 +165,12 @@ let search t ~terms ~time_range =
     Seq.empty
 
 (* Tail via long-polling query_range (WebSocket would be better but
-   requires a WebSocket library). Poll every 2 seconds for new entries. *)
-let tail t ~terms ~emit ~cancel =
+   requires a WebSocket library). Polls periodically for new entries.
+   ~sleep: pass Eio.Time.sleep when running in Eio context to avoid
+   blocking the scheduler. Defaults to Unix.sleepf for CLI use. *)
+let default_sleep secs = Unix.sleepf secs
+
+let tail t ~terms ~emit ~cancel ?(sleep = default_sleep) () =
   let logql = build_logql ~labels:t.default_labels ~terms in
   let source = t.config.name in
   let headers = make_headers t in
@@ -178,8 +183,9 @@ let tail t ~terms ~emit ~cancel =
     let start_time = format_time !last_ts in
     let end_time = format_time (Ptime_clock.now ()) in
     let query_url = Printf.sprintf
-      "%s/loki/api/v1/query_range?query=%s&start=%s&end=%s&limit=1000&direction=forward"
-      t.base_url (Uri.pct_encode logql) start_time end_time in
+      "%s/loki/api/v1/query_range?query=%s&start=%s&end=%s&limit=%d&direction=forward"
+      t.base_url (Uri.pct_encode logql) start_time end_time
+      Weft_constants.loki_tail_limit in
     (try
        Eio.Switch.run @@ fun sw ->
        let client = mk_client sw in
@@ -199,7 +205,7 @@ let tail t ~terms ~emit ~cancel =
      with Eio.Io _ as e ->
        Printf.eprintf "Loki tail poll error: %s\n" (Printexc.to_string e));
     if not (Atomic.get cancel) then
-      Unix.sleepf 2.0
+      sleep Weft_constants.loki_tail_poll_sec
   done
 
 let fetch _t ~dst:_ = Error "Loki sources don't support direct fetch"

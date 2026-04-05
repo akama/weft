@@ -122,8 +122,8 @@ let run_streaming t args ~on_line ~on_stderr ~cancel
   (* Set non-blocking so we can multiplex with select *)
   Unix.set_nonblock stdout_fd;
   Unix.set_nonblock stderr_fd;
-  let stdout_buf = Buffer.create 4096 in
-  let stderr_buf = Buffer.create 256 in
+  let stdout_buf = Buffer.create Weft_constants.ssh_stdout_buf_size in
+  let stderr_buf = Buffer.create Weft_constants.ssh_stderr_buf_size in
   let read_lines_from fd buf callback =
     let tmp = Bytes.create 4096 in
     (try

@@ -1,5 +1,5 @@
 (library
  (name weft_tui)
  (public_name weft.tui)
- (libraries weft_types weft_search weft_config weft_time notty notty.unix eio
+ (libraries weft_types weft_constants weft_search weft_config weft_time notty notty.unix eio
             ptime ptime.clock.os))
