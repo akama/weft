@@ -385,7 +385,7 @@ let load_all ?time_range ctx =
       Ptime.compare a.timestamp b.timestamp) entries in
     (adapter.name, List.to_seq sorted)
   ) ctx.sources in
-  Weft_merge.Batch_merge.merge streams
+  Weft_merge.Batch_merge.merge_with_dedup streams
 
 let add_term t term_str =
   match Term_manager.add_term t.term_manager term_str with
