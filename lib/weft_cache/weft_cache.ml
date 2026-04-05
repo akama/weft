@@ -86,6 +86,19 @@ let store_data t ~source_name seg data =
      update_manifest t source_name { manifest with segments });
   seg
 
+(* Remove a segment — delete file and remove from manifest *)
+let remove_segment t ~source_name (seg : Weft_types.segment) =
+  let dir = Filename.concat t.base_dir source_name in
+  let path = Filename.concat dir seg.local_path in
+  (try Sys.remove path with Sys_error _ -> ());
+  (match get_manifest t source_name with
+   | None -> ()
+   | Some manifest ->
+     let segments = List.filter (fun (s : Weft_types.segment) ->
+       s.id <> seg.id
+     ) manifest.segments in
+     update_manifest t source_name { manifest with segments })
+
 let seal_segment t ~source_name seg ~end_time =
   let dir = Filename.concat t.base_dir source_name in
   let full_path = Filename.concat dir seg.local_path in
