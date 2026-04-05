@@ -77,6 +77,9 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
 
   let clock = Eio.Stdenv.clock env in
   let terms_ref = ref initial_terms in
+  (* Track whether any terms exist (even disabled) — affects tail filtering *)
+  let has_any_terms () =
+    Weft_search.all_terms search <> [] in
 
   let model = Weft_tui.create ~search ~time_range in
 
@@ -248,11 +251,14 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
           (t, Re.compile (Re.Pcre.re (Re.Pcre.quote t)))
         ) current_terms in
         List.iter (fun (entry : log_entry) ->
+          (* Check source is enabled *)
+          let source_ok = Weft_tui.Sidebar.is_source_enabled
+            model.sidebar entry.source in
           let dominated = match term_res with
-            | [] -> true
+            | [] -> not (has_any_terms ())
             | _ -> List.exists (fun (_t, re) -> Re.execp re entry.raw) term_res
           in
-          if dominated then begin
+          if dominated && source_ok then begin
             let entry = match term_res with
               | [] -> entry
               | _ ->
@@ -529,11 +535,13 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                      (t, Re.compile (Re.Pcre.re (Re.Pcre.quote t)))
                    ) current_terms in
                    List.iter (fun (entry : log_entry) ->
+                     let source_ok = Weft_tui.Sidebar.is_source_enabled
+                       model.sidebar entry.source in
                      let dominated = match term_res with
-                       | [] -> true
+                       | [] -> not (has_any_terms ())
                        | _ -> List.exists (fun (_t, re) ->
                            Re.execp re entry.raw) term_res in
-                     if dominated then begin
+                     if dominated && source_ok then begin
                        let entry = match term_res with
                          | [] -> entry
                          | _ ->
