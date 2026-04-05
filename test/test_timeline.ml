@@ -136,6 +136,54 @@ let test_focus_narrowing_source_isolate () =
   Alcotest.(check (option string)) "reset (worker gone)"
     (Some "gw msg") (selected t)
 
+let test_freeze_prevents_auto_follow () =
+  let t = Weft_tui.Timeline.create () in
+  Weft_tui.Timeline.set_entries t [
+    make_entry ~source:"a" ~secs:1 "first";
+    make_entry ~source:"a" ~secs:2 "second";
+  ];
+  Weft_tui.Timeline.scroll_down t;
+  Alcotest.(check (option string)) "on second"
+    (Some "second") (selected t);
+  (* Simulate: search dispatched, freeze auto-follow *)
+  Weft_tui.Timeline.freeze_auto_follow := true;
+  (* Tail entries arrive while frozen *)
+  Weft_tui.Timeline.append_entry t (make_entry ~source:"a" ~secs:3 "tail1");
+  Weft_tui.Timeline.append_entry t (make_entry ~source:"a" ~secs:4 "tail2");
+  Weft_tui.Timeline.append_entry t (make_entry ~source:"a" ~secs:5 "tail3");
+  (* Should still be on "second", not jumped to tail entries *)
+  Alcotest.(check (option string)) "still on second (frozen)"
+    (Some "second") (selected t);
+  (* Search completes, set_entries with broader results *)
+  Weft_tui.Timeline.freeze_auto_follow := false;
+  Weft_tui.Timeline.set_entries t [
+    make_entry ~source:"a" ~secs:1 "first";
+    make_entry ~source:"a" ~secs:2 "second";
+    make_entry ~source:"a" ~secs:3 "third";
+    make_entry ~source:"a" ~secs:4 "fourth";
+  ];
+  Alcotest.(check (option string)) "restored to second"
+    (Some "second") (selected t)
+
+let test_freeze_desc_mode () =
+  let t = Weft_tui.Timeline.create () in
+  Weft_tui.Timeline.toggle_order t;  (* Desc *)
+  Weft_tui.Timeline.set_entries t [
+    make_entry ~source:"a" ~secs:1 "oldest";
+    make_entry ~source:"a" ~secs:2 "middle";
+    make_entry ~source:"a" ~secs:3 "newest";
+  ];
+  (* In Desc, display 0=newest. Scroll to middle *)
+  Weft_tui.Timeline.scroll_down t;
+  Alcotest.(check (option string)) "on middle"
+    (Some "middle") (selected t);
+  Weft_tui.Timeline.freeze_auto_follow := true;
+  Weft_tui.Timeline.append_entry t (make_entry ~source:"a" ~secs:4 "tail1");
+  Weft_tui.Timeline.append_entry t (make_entry ~source:"a" ~secs:5 "tail2");
+  Alcotest.(check (option string)) "still middle (frozen desc)"
+    (Some "middle") (selected t);
+  Weft_tui.Timeline.freeze_auto_follow := false
+
 let () =
   Alcotest.run "weft_timeline" [
     "focus", [
@@ -145,5 +193,7 @@ let () =
       Alcotest.test_case "desc mode" `Quick test_focus_preserved_desc_mode;
       Alcotest.test_case "term disable" `Quick test_focus_broadening_term_disable;
       Alcotest.test_case "source isolate" `Quick test_focus_narrowing_source_isolate;
+      Alcotest.test_case "freeze asc" `Quick test_freeze_prevents_auto_follow;
+      Alcotest.test_case "freeze desc" `Quick test_freeze_desc_mode;
     ];
   ]
