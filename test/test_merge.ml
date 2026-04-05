@@ -82,6 +82,26 @@ let test_merge_many_sources_sorted () =
   Alcotest.(check bool) "interleaved (multiple sources in first 10)"
     true (List.length unique > 1)
 
+let test_unsorted_source_input () =
+  (* Simulate tail segments where entries arrive out of order
+     (e.g. cron jobs that fire at delayed times) *)
+  let s1 = List.to_seq [
+    make_entry ~source:"a" ~secs:1 "a1";
+    make_entry ~source:"a" ~secs:3 "a3";
+  ] in
+  (* Source b has entries out of order — this breaks merge *)
+  let s2 = List.to_seq [
+    make_entry ~source:"b" ~secs:4 "b4";
+    make_entry ~source:"b" ~secs:2 "b2";  (* out of order! *)
+  ] in
+  let merged = Weft_merge.Batch_merge.merge [("a", s1); ("b", s2)] in
+  let entries = List.of_seq merged in
+  let raws = List.map (fun (e : log_entry) -> e.raw) entries in
+  (* Merge can't fix unsorted input — demonstrates why per-source
+     sorting is needed before passing to merge *)
+  Alcotest.(check (list string)) "unsorted input produces wrong order"
+    ["a1"; "a3"; "b4"; "b2"] raws
+
 let () =
   Alcotest.run "weft_merge" [
     "heap", [
@@ -92,5 +112,6 @@ let () =
       Alcotest.test_case "empty" `Quick test_batch_merge_empty;
       Alcotest.test_case "single stream" `Quick test_batch_merge_single;
       Alcotest.test_case "many sources sorted" `Quick test_merge_many_sources_sorted;
+      Alcotest.test_case "unsorted input" `Quick test_unsorted_source_input;
     ];
   ]
