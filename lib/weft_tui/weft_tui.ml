@@ -3,7 +3,7 @@ open Weft_types
 
 type focus = Sources | Terms | Timeline
 
-type overlay = None_ | Help | Heatmap
+type overlay = None_ | Help | Heatmap | Log
 
 type model = {
   search_bar : Search_bar.t;
@@ -19,6 +19,7 @@ type model = {
   mutable height : int;
   mutable time_range : time_range option;
   mutable overlay : overlay;
+  mutable log_scroll : int;
 }
 
 let create ~search ~time_range =
@@ -36,6 +37,7 @@ let create ~search ~time_range =
     height = 24;
     time_range;
     overlay = None_;
+    log_scroll = 0;
   }
 
 let format_time_range = function
@@ -172,6 +174,19 @@ let handle_key model key =
      | `ASCII 'H' | `ASCII 'h' ->
        if model.overlay = Heatmap then model.overlay <- None_
        else model.overlay <- Heatmap
+     | `ASCII 'L' | `ASCII 'l' ->
+       if model.overlay = Log then model.overlay <- None_
+       else begin model.overlay <- Log; model.log_scroll <- 0 end
+     | `ASCII 'j' | `Arrow `Down when model.overlay = Log ->
+       model.log_scroll <- model.log_scroll + 1
+     | `ASCII 'k' | `Arrow `Up when model.overlay = Log ->
+       model.log_scroll <- max 0 (model.log_scroll - 1)
+     | `Page `Down when model.overlay = Log ->
+       model.log_scroll <- model.log_scroll + 20
+     | `Page `Up when model.overlay = Log ->
+       model.log_scroll <- max 0 (model.log_scroll - 20)
+     | `Home | `ASCII 'g' when model.overlay = Log ->
+       model.log_scroll <- 0
      | `ASCII 'q' -> model.quit <- true
      (* Allow time navigation while in heatmap *)
      | `ASCII '<' | `ASCII ',' when model.overlay = Heatmap ->
@@ -392,6 +407,8 @@ let handle_key model key =
       model.overlay <- Help
     | `ASCII 'H' ->
       model.overlay <- (if model.overlay = Heatmap then None_ else Heatmap)
+    | `ASCII 'L' ->
+      model.overlay <- Log; model.log_scroll <- 0
     | _ -> ()
   end
 
@@ -469,6 +486,9 @@ let render model =
       ~entries:model.timeline.entries ~sources
       ~width:w ~height:h in
     heatmap_img
+  | Log ->
+    Status.render_log model.status ~width:w ~height:h
+      ~scroll_offset:model.log_scroll
 
 let run_ui model term =
   let img = ref (render model) in
