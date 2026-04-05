@@ -279,7 +279,20 @@ let handle_key model key =
        | Some _sid -> request_refresh model
        | None -> ())
     | `ASCII 'x' ->
-      (match Sidebar.isolate_selected_source model.sidebar with
+      let source_to_isolate = match model.focus with
+        | Sources ->
+          Sidebar.isolate_selected_source model.sidebar
+        | Timeline | Terms ->
+          (* Use the source from the selected timeline entry *)
+          (match Timeline.selected_entry model.timeline with
+           | Some entry ->
+             let all_sids = List.map fst model.sidebar.sources in
+             model.sidebar.disabled_sources <-
+               List.filter (fun s -> s <> entry.source) all_sids;
+             Some entry.source
+           | None -> None)
+      in
+      (match source_to_isolate with
        | Some _sid -> request_refresh model
        | None -> ())
     | `ASCII 'X' ->
