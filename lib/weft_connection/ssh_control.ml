@@ -162,9 +162,14 @@ let run_streaming t args ~on_line ~on_stderr ~cancel
             read_lines_from stderr_fd stderr_buf on_stderr
         ) ready
       done
-    with End_of_file -> ()
+    with End_of_file | Eio.Cancel.Cancelled _ -> ()
   ) ~finally:(fun () ->
-    ignore (Unix.close_process_full (stdout_ic, _stdin_oc, stderr_ic)))
+    (* Kill the SSH process by closing its stdin, then close all channels.
+       Don't use close_process_full — it waits for the child which blocks
+       forever for long-running commands like tail -F. *)
+    (try close_out _stdin_oc with Sys_error _ -> ());
+    (try close_in stdout_ic with Sys_error _ -> ());
+    (try close_in stderr_ic with Sys_error _ -> ()))
 
 let close t =
   if t.active then begin
