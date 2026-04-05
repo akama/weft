@@ -179,9 +179,14 @@ let close t =
          socket may already be gone if the process was killed. *)
       let ctl_path = t.control_path in
       if Sys.file_exists ctl_path then
-        (try
-           ignore (run_command t ["-O"; "exit"])
-         with Eio.Io _ | Failure _ -> ())
+        (* Use shell to suppress "Exit request sent." from stderr *)
+        let (base, host_args) = parse_transport t.transport_cmd in
+        let cmd = String.concat " " ([
+          base; "-o"; Printf.sprintf "ControlPath=%s" t.control_path;
+          "-o"; "ControlMaster=auto"
+        ] @ host_args @ ["-O"; "exit"; ">/dev/null"; "2>&1"]) in
+        (try ignore (Sys.command cmd)
+         with Sys_error _ -> ())
     end;
     t.active <- false
   end
