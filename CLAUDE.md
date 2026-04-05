@@ -19,11 +19,10 @@ Please use CLAUDE.md to store relevent facts.
 
 - **Name**: weft — unified log search TUI
 - **Language**: OCaml 5.2.1 (opam switch: `weft`)
-- **Build**: `dune build` / `dune runtest` (45 tests)
+- **Build**: `dune build` / `dune runtest` (58 tests across 9 executables)
 - **TUI**: Notty directly (not Minttea — Riot incompatible with OCaml 5.2+)
 - **Concurrency**: Eio fibers (search fiber + per-source tail fibers + TUI fiber)
 - **Config**: TOML via otoml (formats.toml + sources.toml)
-- **Tests**: Alcotest — 7 test executables, 45 tests total
 
 ## Key Libraries
 
@@ -39,15 +38,22 @@ digestif, camlzip, inotify, base64, http, uri
 - **Eio**: `Unix.select` blocks the scheduler; use `Eio_unix.await_readable` or pluggable wait
 - **Eio**: `Unix.sleepf` blocks the scheduler; use `Eio.Time.sleep`
 - **Eio**: Optional params — pass value directly, not wrapped in `Some`
-- **Eio**: `Eio.Switch.fail sw Exit` needs `try ... with Exit` to catch
+- **Eio**: `Eio.Switch.fail sw Exit` needs `try ... with Exit | Eio.Cancel.Cancelled _`
+- **Eio**: `Unix.close_process_full` waits for child — hangs on `tail -F`. Close channels manually.
 - **Error handling**: Never use `with _ ->`. Always catch specific exceptions.
 - **Field name collisions**: `log_entry.timestamp` vs `format_config.timestamp` — use type annotations
 - **Ptime.Span.of_int_s**: Doesn't accept negative values; use `sub_span` for going backward
+- **Seq.take**: Takes oldest entries. On truncation, keep newest to avoid gaps with tail data.
+- **Merge engine**: Requires sorted input per source. Tail segments may not be sorted — sort per-source before merge.
+- **Tail segments**: Created lazily (on first flush) to avoid empty segment warnings.
+- **Rotation**: Remove old tail segment after fetching authoritative archive to prevent duplication.
+- **Cache buffers**: Flush tail buffers before dispatching search to ensure cache has recent data.
+- **Auto-follow**: Freeze during search-in-flight to preserve selection for set_entries restoration.
 
 ## CLI Modes
 
 ```
-weft                                    # TUI (default to last 1h, live tail)
+weft                                    # TUI (default to configured time range, live tail)
 weft --dump -s ERROR --limit 10         # One-shot search
 weft --live -s ERROR                    # CLI tail mode (Ctrl-C to stop)
 weft --json -s ERROR                    # JSON output (implies --dump)
@@ -58,21 +64,32 @@ weft --dump --since 12:00 --until 13:00 # Specific window
 ## TUI Keys
 
 ```
-j/k  Up/Down      Scroll            /     Add search term
-PgUp/PgDn         Page              d     Delete term
-g/Home G/End      Top/bottom        s     Toggle source
-Tab               Cycle focus       t     Toggle term
-Enter             Detail pane       i/I   Isolate/restore terms
-o                 Sort order        </> -/+ r  Time range
-?                 Help              H     Heatmap
-q                 Quit
+Navigation:
+  j/k  Up/Down      Scroll line       PgUp/PgDn    Page
+  g/Home G/End      Top/bottom        Tab          Cycle focus
+  Enter             Detail pane       o            Sort order
+
+Search:
+  /                 Add term          d            Delete term
+  s                 Toggle source     t            Toggle term
+  i/I               Isolate/restore terms
+  x/X               Isolate/restore sources
+
+Time:
+  </> ,/.           Shift earlier/later
+  -/+ _/=           Narrow/widen
+  r                 Reset to default range
+
+Views:
+  ?                 Help              H            Heatmap
+  L                 Status log        q            Quit
 ```
 
 ## Source Types
 
-- `type = "file"` — local file, inotify tail, rotation with archive re-discovery
-- `type = "directory"` — glob expansion to sub-sources
-- `type = "remote"` — SSH fetch/tail, ControlMaster, stderr rotation detection
+- `type = "file"` — local file, inotify tail (polling fallback for macOS), rotation with archive re-discovery
+- `type = "directory"` — glob expansion to per-file sub-sources with individual tail fibers
+- `type = "remote"` — SSH fetch/tail via ControlMaster, stderr rotation detection, remote glob support
 - `type = "loki"` — HTTP query_range API, 5s poll tail, label selectors
 
 ## Test Data Generator
