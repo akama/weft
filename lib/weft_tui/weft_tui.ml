@@ -80,14 +80,9 @@ let do_search_with search params =
     Weft_search.load_all ?time_range:params.sp_time_range search
   in
   let entry_list = List.of_seq (Seq.take 100000 entries) in
-  let filtered = List.filter (fun (e : log_entry) ->
+  List.filter (fun (e : log_entry) ->
     not (List.mem e.source params.sp_disabled)
-  ) entry_list in
-  (* Ensure chronological order — merge should handle this but
-     tail segments may not be perfectly sorted *)
-  List.sort (fun (a : log_entry) (b : log_entry) ->
-    Ptime.compare a.timestamp b.timestamp
-  ) filtered
+  ) entry_list
 
 (* Synchronous refresh — used for initial load *)
 let refresh_search model =

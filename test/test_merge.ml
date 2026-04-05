@@ -50,6 +50,38 @@ let test_batch_merge_single () =
   let entries = List.of_seq merged in
   Alcotest.(check int) "single stream" 2 (List.length entries)
 
+let test_merge_many_sources_sorted () =
+  (* 6 sources with overlapping timestamps — verify output is strictly sorted *)
+  let sources = List.init 6 (fun src_i ->
+    let name = Printf.sprintf "src_%d" src_i in
+    let entries = List.init 50 (fun j ->
+      let secs = (src_i * 3) + (j * 10) + (Random.int 5) in
+      make_entry ~source:name ~secs:(secs + 1000)
+        (Printf.sprintf "%s_%d" name j)
+    ) in
+    (* Sort within each source (merge requires sorted input streams) *)
+    let sorted = List.sort (fun (a : log_entry) (b : log_entry) ->
+      Ptime.compare a.timestamp b.timestamp) entries in
+    (name, List.to_seq sorted)
+  ) in
+  let merged = Weft_merge.Batch_merge.merge sources in
+  let entries = List.of_seq merged in
+  Alcotest.(check int) "300 entries" 300 (List.length entries);
+  (* Verify strictly sorted *)
+  let rec check_sorted = function
+    | [] | [_] -> true
+    | (a : log_entry) :: ((b : log_entry) :: _ as rest) ->
+      if Ptime.is_later a.timestamp ~than:b.timestamp then false
+      else check_sorted rest
+  in
+  Alcotest.(check bool) "sorted output" true (check_sorted entries);
+  (* Verify entries from multiple sources are interleaved *)
+  let first_10_sources = List.filteri (fun i _ -> i < 10) entries
+    |> List.map (fun (e : log_entry) -> e.source) in
+  let unique = List.sort_uniq String.compare first_10_sources in
+  Alcotest.(check bool) "interleaved (multiple sources in first 10)"
+    true (List.length unique > 1)
+
 let () =
   Alcotest.run "weft_merge" [
     "heap", [
@@ -59,5 +91,6 @@ let () =
       Alcotest.test_case "two streams" `Quick test_batch_merge;
       Alcotest.test_case "empty" `Quick test_batch_merge_empty;
       Alcotest.test_case "single stream" `Quick test_batch_merge_single;
+      Alcotest.test_case "many sources sorted" `Quick test_merge_many_sources_sorted;
     ];
   ]
