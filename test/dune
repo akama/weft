@@ -1,7 +1,7 @@
 (tests
  (names test_timestamp test_middleware test_multiline test_grok
-        test_merge test_dedup test_functional)
+        test_merge test_dedup test_functional test_timeline)
  (libraries weft_types weft_config weft_time weft_middleware
-            weft_cache weft_merge weft_search weft_source
+            weft_cache weft_merge weft_search weft_source weft_tui
             alcotest ptime ptime.clock.os
             re yojson digestif str eio_main unix))
