@@ -1,79 +1,69 @@
-# 2026-04-04: Full Build — From Design Doc to Working Tool
+# 2026-04-04 / 2026-04-05: Full Build — From Design Doc to Working Tool
 
 ## Session 1: Scaffolding and Core Libraries
-
-Built the full weft project from DESIGN.md:
-- 11 libraries + bin + test, all compiling on OCaml 5.2.1
-- Notty for TUI (Minttea incompatible with 5.x)
+- 11 libraries + bin + test on OCaml 5.2.1, Notty for TUI
 - 24 unit tests passing
 
 ## Session 2: End-to-End Pipeline
-
-- `--dump` mode for headless testing
-- Fixed config parser (format subtables double-wrapped)
-- Cache population on first read
-- Archive discovery + decompression (gz/bz2/xz/zst)
-- gen_logs tool for test data generation
+- `--dump` mode, config parser fix, cache population, archive discovery
+- gen_logs test data generator
 
 ## Session 3: Design Gap Closure
-
-- Eliminated all `with _ ->` patterns (specific exceptions only)
-- Eio fiber tree: per-source fibers, merge fiber, cache maintenance
-- Loki adapter: HTTP search via cohttp-eio, long-poll tail
-- TUI key handlers: s/t/d for toggles, Tab focus cycling
-- inotify for local file watching (replaced polling)
-- SSH socket permissions (0700)
+- Error handling (no `with _ ->`), Eio fiber tree, Loki HTTP adapter
+- TUI key handlers, inotify, SSH socket permissions
 
 ## Session 4: Testing and Live Mode
-
-- 14 functional tests (full pipeline for all formats)
-- `--live` CLI mode: tail local/remote files
-- TUI input fix: Eio_unix.await_readable (not Unix.select)
-- Tab key: Notty sends `Tab variant
-- Control char sanitization for multiline entries
+- 14 functional tests, `--live` CLI mode, TUI input fix
+- Tab key, control char sanitization for multiline entries
 
 ## Session 5: Realistic Test Data + Remote Sources
-
-- gen_logs rewrite: microservice simulator with correlated trace_ids
-  - nginx -> api-gateway -> worker-svc + auth-svc + cron-processor
-  - Delayed async jobs (30-120s) with same trace_id
-- Remote SSH: fetch + cache + search tested against real host
-- Loki integration: tested against real Grafana Loki instance
-- All three source types working end-to-end
+- gen_logs microservice simulator with correlated trace_ids
+- Remote SSH and Loki integration tested against real host
 
 ## Session 6: Time Range, Heatmap, Status Bar
-
-- `--since`/`--until` CLI flags (relative: 1h, 30m; absolute: 12:00, ISO8601)
-- TUI time controls: `</>` shift, `-/+` zoom, `r` reset
-- Segment-level time filtering (skip irrelevant archived segments)
-- Time heatmap (`H`): density visualization per source
-- Help screen (`?`): all keybindings
-- Status bar: search progress, cache operations, rotation events
-- Sort order toggle (`o`): oldest first / newest first
-- Term isolation (`i`/`I`): focus on one term, restore all
-- Date display in timestamps when data spans multiple days
+- `--since`/`--until`, TUI time controls, segment-level filtering
+- Heatmap, help screen, status bar, sort order, term isolation
 
 ## Session 7: Eio Fiber Architecture + Live Tailing in TUI
-
-- Replaced Unix.select/Thread with pure Eio fibers
-- Search fiber: background search via Eio.Stream, snapshot params
-- Per-source tail fibers: inotify (Eio_unix.await_readable), SSH streaming
+- Pure Eio fibers (no Unix.select/Thread/Domain)
+- Per-source tail fibers with inotify/SSH streaming
 - Tail entries written to cache (search finds live data)
-- Auto-follow at live edge (newest first: top, oldest first: bottom)
-- Rotation lifecycle: seal segment + re-discover + fetch authoritative archives
-- gen_logs: `--rotate-sec` and `--keep` for live rotation testing
-- Page up/down, go to top/bottom navigation
+- Auto-follow at live edge, rotation lifecycle
 
-## Test Infrastructure
+## Session 8: Design Doc Gap Closure
+- default_time_range and catch_up_timeout_sec from config
+- Dedup between catch-up and tail, directory tailing in TUI
+- Archive fetch progress reporting, macOS polling fallback
+- Remote directory globs via SSH
 
-- 45 unit/functional tests across 7 executables
-- gen_logs: microservice simulator with trace_id correlation
-- Live rotation testing: `--rotate-sec 60 --keep 5`
-- Remote test host configured for SSH + Loki testing
-- Mixed source testing: local + SSH + Loki in one query
+## Session 9: Bug Fixes and Robustness
+- Segment seal path fix (missing cache_dir/source prefix)
+- Source isolation from timeline (`x`/`X` keys)
+- Tail fibers respect disabled terms and sources
+- Sort search results (removed — merge handles it with per-source sort)
+- Quit hangs (close_process_full waits for tail -F, close channels instead)
+- SSH ControlMaster socket cleanup, suppress "Exit request sent."
+- Empty tail segments (lazy creation on first flush)
+- Old tail segments removed after fetching authoritative archive
+- load_all uses merge_with_dedup to eliminate cross-segment duplicates
+
+## Session 10: Focus Preservation and Data Integrity
+- Preserve selected entry across search refreshes (timestamp + raw fallback)
+- Freeze auto-follow during search-in-flight (race condition fix)
+- Flush tail buffers before search dispatch (data continuity)
+- Per-source sort before merge (cron jobs out of timestamp order)
+- Tail entries respect time range filter
+- Seq.take truncation keeps newest entries (not oldest) to avoid gaps
+- 'r' resets to default_time_range, not "all time"
+- Default time range applies regardless of search terms
+- Status log viewer (L key) with scrollable history
+
+## Test Coverage
+- 58 tests across 9 executables
+- Unit: timestamp (9), middleware (7), multiline (4), grok (4), merge (6), dedup (3)
+- Functional: pipeline (14), timeline focus (8), truncation (3)
 
 ## Known Limitations
-
-- Loki tail uses 5s poll (no WebSocket implementation)
-- Directory sources don't have per-file tail fibers in TUI
-- No TLS support for Loki (cohttp-eio https requires tls package)
+- Loki tail uses 5s poll (no WebSocket)
+- No TLS for Loki (cohttp-eio https requires tls package)
+- 100k entry display limit (warning shown, use time range to see all data)

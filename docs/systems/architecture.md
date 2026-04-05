@@ -35,7 +35,9 @@ lib/
   weft_app/            Application wiring: CLI args, Eio fiber engine,
                          TUI/dump/live modes, formatting
 
-test/                  45 tests across 7 executables
+test/                  58 tests across 9 executables
+  test_timeline.ml     8 tests — focus preservation, auto-follow freeze
+  test_truncation.ml   3 tests — entry limit keep-newest behavior
 ```
 
 ## Eio Fiber Tree (Design Doc Section 17)
@@ -152,8 +154,10 @@ Entries printed to stdout as they arrive. Ctrl-C to stop.
 | / | Add search term |
 | d | Delete selected term |
 | s | Toggle source on/off |
+| x | Isolate source (context: sidebar or timeline entry) |
+| X | Restore all sources |
 | t | Toggle term visibility |
-| i | Isolate term (disable all others) |
+| i | Isolate term (context: sidebar or timeline entry) |
 | I | Restore all terms |
 
 ### Time Range
@@ -169,6 +173,7 @@ Entries printed to stdout as they arrive. Ctrl-C to stop.
 | o | Toggle sort order (oldest/newest first) |
 | ? | Help screen |
 | H | Time heatmap overview |
+| L | Status log (scrollable message history) |
 | q | Quit |
 
 ## Key Design Decisions
@@ -185,8 +190,14 @@ Entries printed to stdout as they arrive. Ctrl-C to stop.
 - **Post-filter entries** within segments for precision
 - **Tail entries written to cache** — search finds live data (design section 17)
 - **Snapshot search params** at request time — avoids data races with mutable model
-- **Generation counter** for search results — discard stale results from older requests
 - **Auto-follow at live edge** — Asc: bottom, Desc: top; scroll away to pin
+- **Freeze auto-follow** during search-in-flight — preserves selection for focus restoration
+- **Flush tail buffers** before search dispatch — ensures cache has recent data
+- **Per-source sort** before merge — tail segments may not be in timestamp order (cron jobs)
+- **Lazy tail segments** — created on first flush, not eagerly (avoids empty file warnings)
+- **Remove old tail segment** after fetching authoritative archive on rotation
+- **Keep newest on truncation** — Seq.take 100k keeps newest, not oldest, to avoid gaps
+- **Default time range** from config — 'r' resets to configured range, not "all time"
 
 ## Build
 
@@ -194,7 +205,7 @@ Entries printed to stdout as they arrive. Ctrl-C to stop.
 opam switch weft          # OCaml 5.2.1
 eval $(opam env --switch=weft)
 dune build                # build all
-dune runtest              # 45 tests
+dune runtest              # 58 tests
 ```
 
 ## Test Data Generator
