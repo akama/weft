@@ -265,6 +265,15 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
           (t, Re.compile (Re.Pcre.re (Re.Pcre.quote t)))
         ) current_terms in
         List.iter (fun (entry : log_entry) ->
+          (* Check time range *)
+          let in_range = match model.time_range with
+            | None -> true
+            | Some tr ->
+              Ptime.is_later entry.timestamp ~than:tr.start_ &&
+              (match tr.end_ with
+               | None -> true
+               | Some end_t -> Ptime.is_earlier entry.timestamp ~than:end_t)
+          in
           (* Check source is enabled *)
           let source_ok = Weft_tui.Sidebar.is_source_enabled
             model.sidebar entry.source in
@@ -272,7 +281,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
             | [] -> true
             | _ -> List.exists (fun (_t, re) -> Re.execp re entry.raw) term_res
           in
-          if dominated && source_ok then begin
+          if dominated && source_ok && in_range then begin
             let entry = match term_res with
               | [] -> entry
               | _ ->
@@ -281,9 +290,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                 ) term_res in
                 { entry with terms = matched }
             in
-            (* Non-blocking: drop if stream is full rather than blocking the tail *)
-            ignore (Eio.Stream.take_nonblocking tail_entries |> ignore;
-                    Eio.Stream.add tail_entries entry; true)
+            Eio.Stream.add tail_entries entry
           end
         ) entries_to_emit
       in
@@ -549,13 +556,21 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                      (t, Re.compile (Re.Pcre.re (Re.Pcre.quote t)))
                    ) current_terms in
                    List.iter (fun (entry : log_entry) ->
+                     let in_range = match model.time_range with
+                       | None -> true
+                       | Some tr ->
+                         Ptime.is_later entry.timestamp ~than:tr.start_ &&
+                         (match tr.end_ with
+                          | None -> true
+                          | Some end_t -> Ptime.is_earlier entry.timestamp ~than:end_t)
+                     in
                      let source_ok = Weft_tui.Sidebar.is_source_enabled
                        model.sidebar entry.source in
                      let dominated = match term_res with
                        | [] -> true
                        | _ -> List.exists (fun (_t, re) ->
                            Re.execp re entry.raw) term_res in
-                     if dominated && source_ok then begin
+                     if dominated && source_ok && in_range then begin
                        let entry = match term_res with
                          | [] -> entry
                          | _ ->
