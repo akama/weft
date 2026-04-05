@@ -311,15 +311,18 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
              in
              let rotation_cbs : Weft_source.Local_file.rotation_callbacks = {
                on_seal = (fun () ->
+                 (* Seal and remember the old tail segment for removal *)
+                 let old_seg = !active_seg in
                  seal_active_seg ();
                  Weft_tui.Status.set model.status
                    (Printf.sprintf "Rotation: sealed %s, re-discovering archives..."
                       src.name);
-                 (* Re-discover archives — the rotated file (.1, .1.gz) is the
+                 (* Re-discover archives — the rotated file (.1) is the
                     authoritative source. Fetch it to replace our tail segment. *)
                  let archives = Weft_source.Archive.discover_local ~path
                    |> Weft_source.Archive.sort_by_mtime in
                  Weft_cache.update_archives cache ~source_name:src.name archives;
+                 let fetched_any = ref false in
                  List.iter (fun (archive : archive_info) ->
                    let origin = Filename.basename archive.remote_path in
                    let already = match Weft_cache.get_manifest cache src.name with
@@ -334,17 +337,28 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                          let ret = Sys.command
                            (Printf.sprintf "%s '%s' > '%s' 2>/dev/null"
                               cmd archive.remote_path tmp) in
-                         if ret = 0 then
+                         if ret = 0 then begin
                            ignore (Weft_cache.cache_file cache
                              ~source_name:src.name ~origin ~path:tmp);
+                           fetched_any := true
+                         end;
                          (try Sys.remove tmp with Sys_error _ -> ())
                        | None -> ()
-                     end else
+                     end else begin
                        ignore (Weft_cache.cache_file cache
                          ~source_name:src.name ~origin
-                         ~path:archive.remote_path)
+                         ~path:archive.remote_path);
+                       fetched_any := true
+                     end
                    end
                  ) archives;
+                 (* Remove the old tail segment — the fetched archive is
+                    the authoritative copy of the same data *)
+                 if !fetched_any then
+                   (match old_seg with
+                    | Some seg -> Weft_cache.remove_segment cache
+                        ~source_name:src.name seg
+                    | None -> ());
                  Weft_tui.Status.set model.status
                    (Printf.sprintf "Rotation: %s archives updated" src.name));
                on_new = (fun () ->
@@ -415,16 +429,17 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                      ~on_stderr:(fun line ->
                        match Weft_source.Rotation.detect_from_tail_stderr line with
                        | Some Weft_source.Rotation.File_renamed ->
+                         let old_seg = !active_seg in
                          seal_active_seg ();
                          Weft_tui.Status.set model.status
                            (Printf.sprintf "SSH rotation: %s, fetching archives..."
                               src.name);
-                         (* Re-discover and fetch authoritative archives from remote *)
                          let archives = Weft_source.Archive.discover_remote
                            ~ssh ~path
                            |> Weft_source.Archive.sort_by_mtime in
                          Weft_cache.update_archives cache
                            ~source_name:src.name archives;
+                         let fetched_any = ref false in
                          List.iter (fun (archive : archive_info) ->
                            let origin = Filename.basename archive.remote_path in
                            let already = match Weft_cache.get_manifest cache
@@ -448,6 +463,7 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                                   close_out oc;
                                   ignore (Weft_cache.cache_file cache
                                     ~source_name:src.name ~origin ~path:tmp);
+                                  fetched_any := true;
                                   (try Sys.remove tmp with Sys_error _ -> ())
                                 end
                               with Failure msg ->
@@ -455,6 +471,12 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
                                   (Printf.sprintf "Fetch %s failed: %s" origin msg))
                            end
                          ) archives;
+                         (* Remove old tail segment — archive is authoritative *)
+                         if !fetched_any then
+                           (match old_seg with
+                            | Some seg -> Weft_cache.remove_segment cache
+                                ~source_name:src.name seg
+                            | None -> ());
                          new_active_seg (Filename.basename path ^ " (post-rotate)");
                          Weft_tui.Status.set model.status
                            (Printf.sprintf "SSH rotation: %s archives updated"
