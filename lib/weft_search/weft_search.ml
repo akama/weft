@@ -202,17 +202,48 @@ let discover_and_cache_remote_archives adapter cache ssh =
       ) archives
     end
 
+(* Check if a local file has been modified since its cached segment *)
+let local_file_stale adapter cache =
+  match adapter.config.path with
+  | None -> false
+  | Some path ->
+    (try
+       let stat = Unix.stat path in
+       let file_size = Int64.of_int stat.Unix.st_size in
+       match Weft_cache.get_manifest cache adapter.name with
+       | None -> true
+       | Some m ->
+         (* Find the segment for this file (not archives) *)
+         let origin = Filename.basename path in
+         (match List.find_opt (fun (s : segment) ->
+           s.origin = origin) m.segments with
+          | None -> true
+          | Some seg -> file_size <> seg.size_bytes)
+     with Unix.Unix_error _ -> false)
+
 (* Ensure source data is cached, fetching if needed *)
 let ensure_cached ?t_opt ?time_range adapter cache =
-  if Weft_cache.is_cached cache ~source_name:adapter.name then ()
+  let needs_cache = not (Weft_cache.is_cached cache ~source_name:adapter.name)
+    || (adapter.config.source_type = File && local_file_stale adapter cache)
+  in
+  if not needs_cache then ()
   else begin
     match adapter.config.source_type with
     | File ->
+      (* Remove stale segment for the main file before re-caching *)
       (match adapter.config.path with
        | Some path when Sys.file_exists path ->
+         let origin = Filename.basename path in
+         (match Weft_cache.get_manifest cache adapter.name with
+          | Some m ->
+            List.iter (fun (seg : segment) ->
+              if seg.origin = origin then
+                Weft_cache.remove_segment cache ~source_name:adapter.name seg
+            ) m.segments
+          | None -> ());
          ignore (Weft_cache.cache_file cache
            ~source_name:adapter.name
-           ~origin:(Filename.basename path) ~path)
+           ~origin ~path)
        | _ -> ());
       discover_and_cache_local_archives adapter cache
 
