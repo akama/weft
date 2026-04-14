@@ -33,23 +33,29 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config linux-headers-generic
+          sudo apt-get install -y musl-tools musl-dev pkg-config linux-headers-generic zlib1g-dev
 
-          # Find the musl include directory from the specs file
-          MUSL_INC=$(grep -oP '(?<=-isystem )\S+' $(find / -name musl-gcc.specs 2>/dev/null | head -1) | head -1)
-          echo "MUSL_INC=${MUSL_INC}"
+          # Find musl include dir from specs file
+          SPECS=$(find /usr -name musl-gcc.specs 2>/dev/null | head -1)
+          MUSL_INC=$(grep -oP '(?<=-isystem )\S+' "$SPECS" | head -1)
+          MUSL_PREFIX=$(dirname "$MUSL_INC")
+          echo "MUSL_INC=$MUSL_INC  MUSL_PREFIX=$MUSL_PREFIX"
 
           # Symlink kernel headers into musl sysroot
-          sudo ln -sf /usr/include/linux "${MUSL_INC}/linux"
-          sudo ln -sf /usr/include/asm "${MUSL_INC}/asm"
-          sudo ln -sf /usr/include/asm-generic "${MUSL_INC}/asm-generic"
+          sudo ln -sfn /usr/include/linux "$MUSL_INC/linux"
+          sudo ln -sfn /usr/include/asm-generic "$MUSL_INC/asm-generic"
+          if [ -d /usr/include/asm ]; then
+            sudo ln -sfn /usr/include/asm "$MUSL_INC/asm"
+          else
+            ARCH_INC=$(find /usr/include -maxdepth 2 -name asm -type d 2>/dev/null | head -1)
+            sudo ln -sfn "$ARCH_INC" "$MUSL_INC/asm"
+          fi
 
-          # Build static zlib for musl and install into musl sysroot
-          MUSL_PREFIX=$(dirname "${MUSL_INC}")
+          # Build static zlib for musl
           cd /tmp
           curl -sL -o zlib.tar.gz "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
           tar xzf zlib.tar.gz && cd zlib-1.3.1
-          CC=musl-gcc ./configure --static --prefix="${MUSL_PREFIX}"
+          CC=musl-gcc ./configure --static --prefix="$MUSL_PREFIX"
           make -j$(nproc)
           sudo make install
 
