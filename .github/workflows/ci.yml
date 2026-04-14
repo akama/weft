@@ -25,9 +25,21 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config
-          # Static libraries for musl linking
-          sudo apt-get install -y liburing-dev zlib1g-dev
+          sudo apt-get install -y musl-tools pkg-config liburing-dev
+
+      - name: Build static zlib for musl
+        run: |
+          MUSL_SYSROOT=$(dirname $(musl-gcc -print-libgcc-file-name) 2>/dev/null || echo /usr/lib/x86_64-linux-musl)
+          cd /tmp
+          curl -sL -o zlib.tar.gz "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
+          tar xzf zlib.tar.gz && cd zlib-1.3.1
+          CC=musl-gcc ./configure --static --prefix=/usr
+          make -j$(nproc)
+          sudo make install
+          # Also ensure musl sysroot has linux kernel headers
+          sudo ln -sf /usr/include/linux $(dirname $(musl-gcc -print-libgcc-file-name))/../include/linux 2>/dev/null || true
+          sudo ln -sf /usr/include/asm $(dirname $(musl-gcc -print-libgcc-file-name))/../include/asm 2>/dev/null || true
+          sudo ln -sf /usr/include/asm-generic $(dirname $(musl-gcc -print-libgcc-file-name))/../include/asm-generic 2>/dev/null || true
 
       - name: Install OCaml
         uses: ocaml/setup-ocaml@v3
@@ -39,10 +51,10 @@ jobs:
         run: opam install . --deps-only --with-test --yes
 
       - name: Build
-        run: opam exec -- dune build
+        run: opam exec -- env WEFT_STATIC=1 dune build
 
       - name: Test
-        run: opam exec -- dune runtest
+        run: opam exec -- env WEFT_STATIC=1 dune runtest
 
       - name: Verify static linking
         run: |
