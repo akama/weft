@@ -24,6 +24,6 @@
   (cohttp-eio (>= 6.0.0))
   (digestif (>= 1.2.0))
   (camlzip (>= 1.12))
-  (inotify (>= 2.0))
   (base64 (>= 3.0))
-  (alcotest (and (>= 1.8.0) :with-test))))
+  (alcotest (and (>= 1.8.0) :with-test)))
+ (depopts inotify))

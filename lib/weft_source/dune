@@ -3,4 +3,7 @@
  (public_name weft.source)
  (libraries weft_types weft_constants weft_config weft_connection weft_cache
             weft_middleware weft_time eio cohttp-eio yojson re
-            ptime.clock.os uri base64 http inotify))
+            ptime.clock.os uri base64 http
+            (select file_watcher.ml from
+             (inotify -> file_watcher_inotify.ml)
+             (         -> file_watcher_poll.ml))))

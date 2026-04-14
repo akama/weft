@@ -120,7 +120,7 @@ let default_wait_readable fd timeout =
 (* Default sleep: Unix.sleepf (blocks OS thread — use only outside Eio) *)
 let default_sleep secs = Unix.sleepf secs
 
-(* Tail using inotify (Linux) or polling fallback (macOS/other).
+(* Tail a file for new lines. Uses inotify on Linux, polling on macOS.
    wait_readable: function to poll fd readability. Pass an Eio-aware
    version when running inside Eio to avoid blocking the scheduler. *)
 let tail t ~terms ~emit ~cancel
@@ -162,130 +162,16 @@ let tail t ~terms ~emit ~cancel
     end
   in
 
-  (* Set up inotify *)
-  let inotify_fd = Inotify.create () in
-  let ic = ref (open_in t.path) in
-  seek_in !ic (in_channel_length !ic);  (* start at end *)
-  Fun.protect (fun () ->
-    let _watch = Inotify.add_watch inotify_fd t.path
-      [Inotify.S_Modify; Inotify.S_Move_self; Inotify.S_Delete_self] in
-
-    let reopen () =
-      close_in_noerr !ic;
-      (* Wait briefly for the new file to appear *)
-      sleep Weft_constants.rotation_reopen_delay;
-      if Sys.file_exists t.path then begin
-        ic := open_in t.path;
-        (* Re-add watch on new file *)
-        ignore (Inotify.add_watch inotify_fd t.path
-          [Inotify.S_Modify; Inotify.S_Move_self; Inotify.S_Delete_self])
-      end
-    in
-
-    while not (Atomic.get cancel) do
-      if wait_readable inotify_fd 0.5 then begin
-        let events = Inotify.read inotify_fd in
-        List.iter (fun (_wd, kinds, _cookie, _name) ->
-          if List.mem Inotify.Modify kinds then begin
-            (* New data available — read lines *)
-            let lines = read_new_lines !ic in
-            List.iter emit_line lines
-          end;
-          if List.mem Inotify.Move_self kinds then begin
-            (* File was renamed — rotation detected *)
-            Printf.eprintf "Rotation detected (rename) for %s\n%!" t.path;
-            (* Drain remaining data from old fd *)
-            let drain_start = Unix.gettimeofday () in
-            let drained = ref true in
-            while !drained &&
-                  Unix.gettimeofday () -. drain_start < drain_timeout do
-              let lines = read_new_lines !ic in
-              if lines = [] then drained := false
-              else List.iter emit_line lines;
-              if !drained then sleep Weft_constants.rotation_reopen_delay
-            done;
-            (* Seal old segment and start new *)
-            (match on_rotation with
-             | Some cb -> cb.on_seal (); cb.on_new ()
-             | None -> ());
-            reopen ()
-          end;
-          if List.mem Inotify.Delete_self kinds then begin
-            Printf.eprintf "File deleted: %s\n%!" t.path;
-            (match on_rotation with
-             | Some cb -> cb.on_seal ()
-             | None -> ());
-            reopen ()
-          end
-        ) events
-      end
-      (* select timeout — just loop and check cancel *)
-    done
-  ) ~finally:(fun () ->
-    close_in_noerr !ic;
-    Unix.close inotify_fd
-  )
+  (* Convert rotation_callbacks to the tuple form used by File_watcher *)
+  let rotation_fns = match on_rotation with
+    | Some cb -> Some (cb.on_seal, cb.on_new)
+    | None -> None
+  in
+  File_watcher.tail ~path:t.path ~read_new_lines ~emit_line ~cancel
+    ~on_rotation:rotation_fns ~drain_timeout ~wait_readable ~sleep ()
 
 (* Simplified tail without rotation callbacks — backward compat *)
 let tail_simple t ~terms ~emit ~cancel =
   tail t ~terms ~emit ~cancel ()
-
-(* Polling-based tail for systems without inotify (macOS, etc).
-   Checks file size every poll_interval_ms. Less efficient but portable. *)
-let tail_poll t ~terms ~emit ~cancel
-    ?(on_rotation : rotation_callbacks option)
-    ?(poll_interval_ms = Weft_constants.default_poll_interval_ms)
-    ?(sleep = default_sleep)
-    () =
-  let pattern = if terms = [] then None
-    else Some (Re.compile (Re.Pcre.re (String.concat "|"
-      (List.map Re.Pcre.quote terms)))) in
-  let source = t.config.name in
-  let emit_line line =
-    let matches = match pattern with
-      | None -> true | Some re -> Re.execp re line in
-    if matches then begin
-      let matched_terms = match pattern with
-        | None -> terms
-        | Some _ ->
-          List.filter (fun term ->
-            Re.execp (Re.compile (Re.Pcre.re (Re.Pcre.quote term))) line
-          ) terms in
-      emit { timestamp = Ptime_clock.now (); raw = line;
-             source; terms = matched_terms; metadata = [] }
-    end
-  in
-  let ic = ref (open_in t.path) in
-  seek_in !ic (in_channel_length !ic);
-  let last_inode = ref (Unix.stat t.path).Unix.st_ino in
-  let last_size = ref (Int64.of_int (in_channel_length !ic)) in
-  Fun.protect (fun () ->
-    while not (Atomic.get cancel) do
-      (* Check for rotation *)
-      (match Rotation.check_local_rotation ~path:t.path
-               ~last_inode:!last_inode ~last_size:!last_size with
-       | Some (event, new_inode, new_size) ->
-         (* Drain old fd *)
-         let lines = read_new_lines !ic in
-         List.iter emit_line lines;
-         (match on_rotation, event with
-          | Some cb, _ -> cb.on_seal ()
-          | None, _ -> ());
-         close_in_noerr !ic;
-         last_inode := new_inode;
-         last_size := new_size;
-         sleep Weft_constants.rotation_reopen_delay;
-         if Sys.file_exists t.path then begin
-           (match on_rotation with
-            | Some cb -> cb.on_new () | None -> ());
-           ic := open_in t.path
-         end
-       | None ->
-         let lines = read_new_lines !ic in
-         List.iter emit_line lines;
-         last_size := Int64.of_int (pos_in !ic));
-      sleep (float_of_int poll_interval_ms /. 1000.0)
-    done
-  ) ~finally:(fun () -> close_in_noerr !ic)
 
 let close _t = ()
