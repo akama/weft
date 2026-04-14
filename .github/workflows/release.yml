@@ -67,7 +67,7 @@ jobs:
 
       - name: Install OCaml deps
         run: |
-          opam install . --deps-only --yes
+          opam install . --deps-only --with-test --yes
           if [ "$RUNNER_OS" = "Linux" ]; then opam install inotify --yes; fi
 
       - name: Build
