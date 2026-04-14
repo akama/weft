@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            ocaml_compiler: "ocaml-variants.5.2.1+options,ocaml-option-musl,ocaml-option-static"
+          - os: ubuntu-24.04-arm
+            ocaml_compiler: "ocaml-variants.5.2.1+options,ocaml-option-musl,ocaml-option-static"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools pkg-config
+          # Static libraries for musl linking
+          sudo apt-get install -y liburing-dev zlib1g-dev
+
+      - name: Install OCaml
+        uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: ${{ matrix.ocaml_compiler }}
+          opam-local-packages: ""
+
+      - name: Install OCaml deps
+        run: opam install . --deps-only --with-test --yes
+
+      - name: Build
+        run: opam exec -- dune build
+
+      - name: Test
+        run: opam exec -- dune runtest
+
+      - name: Verify static linking
+        run: |
+          ldd _build/default/bin/main.exe 2>&1 | grep -q "not a dynamic executable"
+          echo "Binary is fully static"
