@@ -16,19 +16,27 @@ jobs:
           - os: ubuntu-latest
             ocaml_compiler: "ocaml-variants.5.2.1+options,ocaml-option-musl,ocaml-option-static"
             artifact: weft-linux-x86_64
+            static: true
           - os: ubuntu-24.04-arm
             ocaml_compiler: "ocaml-variants.5.2.1+options,ocaml-option-musl,ocaml-option-static"
             artifact: weft-linux-aarch64
+            static: true
+          - os: macos-latest
+            ocaml_compiler: "5.2.1"
+            artifact: weft-macos-aarch64
+            static: false
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y musl-tools pkg-config liburing-dev
 
-      - name: Build static zlib for musl
+      - name: Build static zlib for musl (Linux)
+        if: runner.os == 'Linux'
         run: |
           cd /tmp
           curl -sL -o zlib.tar.gz "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
@@ -51,12 +59,13 @@ jobs:
         run: opam install . --deps-only --yes
 
       - name: Build
-        run: opam exec -- env WEFT_STATIC=1 dune build
+        run: opam exec -- env ${{ matrix.static && 'WEFT_STATIC=1' || '_NOOP=1' }} dune build
 
       - name: Test
-        run: opam exec -- env WEFT_STATIC=1 dune runtest
+        run: opam exec -- env ${{ matrix.static && 'WEFT_STATIC=1' || '_NOOP=1' }} dune runtest
 
-      - name: Verify static linking
+      - name: Verify static linking (Linux)
+        if: runner.os == 'Linux'
         run: |
           ldd _build/default/bin/main.exe 2>&1 | grep -q "not a dynamic executable"
           echo "Binary is fully static"
