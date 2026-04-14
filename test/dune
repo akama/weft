@@ -4,4 +4,6 @@
  (libraries weft_types weft_config weft_time weft_middleware
             weft_cache weft_merge weft_search weft_source weft_tui
             alcotest ptime ptime.clock.os
-            re yojson digestif str eio_main unix))
+            re yojson digestif str eio_main unix)
+ (link_flags :standard
+  (:include ../bin/link_flags.sexp)))

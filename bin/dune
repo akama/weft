@@ -1,13 +1,23 @@
 (executable
  (name main)
  (public_name weft)
- (libraries weft_app eio_main))
+ (libraries weft_app eio_main)
+ (link_flags :standard
+  (:include link_flags.sexp)))
 
 (executable
  (name gen_logs)
  (public_name weft-gen-logs)
- (libraries unix))
+ (libraries unix)
+ (link_flags :standard
+  (:include link_flags.sexp)))
 
 (executable
  (name debug_keys)
  (libraries notty notty.unix unix))
+
+(rule
+ (target link_flags.sexp)
+ (action
+  (with-stdout-to %{target}
+   (bash "if [ -n \"${WEFT_STATIC:-}\" ]; then echo '(-ccopt -static -ccopt -L/usr/lib -ccopt -L/usr/x86_64-linux-musl/lib)'; else echo '()'; fi"))))
