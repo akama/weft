@@ -54,7 +54,10 @@ jobs:
           opam-local-packages: ""
 
       - name: Install OCaml deps
-        run: opam install . --deps-only --with-test --yes
+        run: |
+          opam install . --deps-only --with-test --yes
+          # Install inotify on Linux (optional dep, needed for efficient file watching)
+          if [ "$RUNNER_OS" = "Linux" ]; then opam install inotify --yes; fi
 
       - name: Build
         run: opam exec -- env ${{ matrix.static && 'WEFT_STATIC=1' || '_NOOP=1' }} dune build
