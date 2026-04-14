@@ -27,25 +27,29 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install system dependencies (Linux)
+      - name: Prepare musl sysroot (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y musl-tools pkg-config liburing-dev
+          sudo apt-get install -y musl-tools pkg-config linux-headers-generic
 
-      - name: Build static zlib for musl (Linux)
-        if: runner.os == 'Linux'
-        run: |
+          # Find the musl include directory from the specs file
+          MUSL_INC=$(grep -oP '(?<=-isystem )\S+' $(find / -name musl-gcc.specs 2>/dev/null | head -1) | head -1)
+          echo "MUSL_INC=${MUSL_INC}"
+
+          # Symlink kernel headers into musl sysroot
+          sudo ln -sf /usr/include/linux "${MUSL_INC}/linux"
+          sudo ln -sf /usr/include/asm "${MUSL_INC}/asm"
+          sudo ln -sf /usr/include/asm-generic "${MUSL_INC}/asm-generic"
+
+          # Build static zlib for musl and install into musl sysroot
+          MUSL_PREFIX=$(dirname "${MUSL_INC}")
           cd /tmp
           curl -sL -o zlib.tar.gz "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
           tar xzf zlib.tar.gz && cd zlib-1.3.1
-          CC=musl-gcc ./configure --static --prefix=/usr
+          CC=musl-gcc ./configure --static --prefix="${MUSL_PREFIX}"
           make -j$(nproc)
           sudo make install
-          # Ensure musl sysroot has linux kernel headers
-          sudo ln -sf /usr/include/linux $(dirname $(musl-gcc -print-libgcc-file-name))/../include/linux 2>/dev/null || true
-          sudo ln -sf /usr/include/asm $(dirname $(musl-gcc -print-libgcc-file-name))/../include/asm 2>/dev/null || true
-          sudo ln -sf /usr/include/asm-generic $(dirname $(musl-gcc -print-libgcc-file-name))/../include/asm-generic 2>/dev/null || true
 
       - name: Install OCaml
         uses: ocaml/setup-ocaml@v3
@@ -56,7 +60,6 @@ jobs:
       - name: Install OCaml deps
         run: |
           opam install . --deps-only --with-test --yes
-          # Install inotify on Linux (optional dep, needed for efficient file watching)
           if [ "$RUNNER_OS" = "Linux" ]; then opam install inotify --yes; fi
 
       - name: Build

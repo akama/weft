@@ -18,6 +18,7 @@
 
 (rule
  (target link_flags.sexp)
+ (deps static_flags.sh)
  (action
   (with-stdout-to %{target}
-   (bash "if [ -n \"${WEFT_STATIC:-}\" ]; then echo '(-ccopt -static -ccopt -L/usr/lib -ccopt -L/usr/x86_64-linux-musl/lib)'; else echo '()'; fi"))))
+   (bash "sh %{dep:static_flags.sh}"))))
