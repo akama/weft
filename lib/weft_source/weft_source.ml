@@ -3,5 +3,6 @@ module Local_file = Local_file
 module Local_dir = Local_dir
 module Remote = Remote
 module Loki = Loki
+module Journald = Journald
 module Archive = Archive
 module Rotation = Rotation

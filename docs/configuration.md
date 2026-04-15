@@ -275,6 +275,44 @@ glob = "/var/log/api/*.log"     # glob expanded on remote via ssh ls
 format = "myapp"
 ```
 
+#### Journald (systemd journal)
+
+```toml
+[[source]]
+name = "myapp"
+type = "journald"
+unit = "myapp.service"
+format = "raw"
+```
+
+With extra filters:
+```toml
+[[source]]
+name = "myapp"
+type = "journald"
+unit = "myapp.service"
+filter = "PRIORITY=3"         # optional: extra journalctl filter args
+format = "raw"
+```
+
+Remote journald via SSH:
+```toml
+[[source]]
+name = "prod-myapp"
+type = "journald"
+transport = "ssh app-server-1"
+unit = "myapp.service"
+format = "raw"
+```
+
+- `unit`: systemd unit name (required)
+- `filter`: extra args passed to `journalctl` (optional)
+- `transport`: SSH command for remote journals (optional — omit for local)
+- Search via `journalctl -u unit -o json --since X --until Y`
+- Tail via `journalctl -u unit -f -o json`
+- Timestamps extracted from journal's `__REALTIME_TIMESTAMP` field (microsecond precision)
+- Structured fields extracted: unit, priority, pid, exe, syslog identifier
+
 #### Loki
 
 ```toml

@@ -23,7 +23,7 @@ let create ~(limits : limits_config) =
 
 let add_source t (config : source_config) =
   let ssh = match config.source_type with
-    | Remote ->
+    | Remote | Journald ->
       (match config.transport with
        | Some cmd -> Some (Ssh_control.create ~transport_cmd:cmd)
        | None -> None)

@@ -627,6 +627,68 @@ let run_with_tui ~env ~formats_config ~sources_config ~initial_terms
              end
            ) files
          | None -> ())
+
+      | Journald ->
+        (match src.journal_unit with
+         | Some _unit_name ->
+           let ssh = match Weft_connection.Conn_pool.get_connection pool src.name with
+             | Some conn -> conn.ssh
+             | None -> None
+           in
+           let journald : Weft_source.Journald.t = {
+             config = src; ssh;
+           } in
+           Eio.Fiber.fork ~sw (fun () ->
+             Weft_tui.Status.set model.status
+               (Printf.sprintf "Tailing journal %s..." src.name);
+             let eio_sleep secs = Eio.Time.sleep clock secs in
+             (try
+                Weft_source.Journald.tail journald
+                  ~emit:(fun (entry : log_entry) ->
+                    (* Write to cache + emit to TUI *)
+                    Buffer.add_string cache_buf entry.raw;
+                    Buffer.add_char cache_buf '\n';
+                    incr cache_line_count;
+                    if !cache_line_count mod cache_flush_interval = 0 then
+                      flush_cache_buf ();
+                    let current_terms = !terms_ref in
+                    let term_res = List.map (fun t ->
+                      (t, Re.compile (Re.Pcre.re (Re.Pcre.quote t)))
+                    ) current_terms in
+                    let in_range = match model.time_range with
+                      | None -> true
+                      | Some tr ->
+                        Ptime.is_later entry.timestamp ~than:tr.start_ &&
+                        (match tr.end_ with
+                         | None -> true
+                         | Some end_t ->
+                           Ptime.is_earlier entry.timestamp ~than:end_t)
+                    in
+                    let source_ok = Weft_tui.Sidebar.is_source_enabled
+                      model.sidebar entry.source in
+                    let dominated = match term_res with
+                      | [] -> true
+                      | _ -> List.exists (fun (_t, re) ->
+                          Re.execp re entry.raw) term_res
+                    in
+                    if dominated && source_ok && in_range then begin
+                      let entry = match term_res with
+                        | [] -> entry
+                        | _ ->
+                          let matched = List.filter_map (fun (t, re) ->
+                            if Re.execp re entry.raw then Some t else None
+                          ) term_res in
+                          { entry with terms = matched }
+                      in
+                      Eio.Stream.add tail_entries entry
+                    end)
+                  ~cancel:tail_cancel ~sleep:eio_sleep ()
+              with exn ->
+                Weft_tui.Status.set model.status
+                  (Printf.sprintf "Journal tail %s: %s" src.name
+                     (Printexc.to_string exn)))
+           )
+         | None -> ())
     ) sources_config.sources;
 
     (* TUI event loop *)
@@ -877,6 +939,28 @@ let run_live ~env ~formats_config ~sources_config ~initial_terms ~json =
        | _ -> ())
 
     | Directory | Loki -> ()
+
+    | Journald ->
+      (match src.journal_unit with
+       | Some _unit_name ->
+         let ssh = match Weft_connection.Conn_pool.get_connection pool src.name with
+           | Some conn -> conn.ssh
+           | None -> None
+         in
+         let journald : Weft_source.Journald.t = {
+           config = src; ssh;
+         } in
+         Eio.Fiber.fork ~sw (fun () ->
+           Printf.eprintf "Tailing journal %s...\n%!" src.name;
+           (try
+              Weft_source.Journald.tail journald
+                ~emit:(fun (entry : log_entry) ->
+                  emit_raw ~source:src.name ~pipeline_state entry.raw)
+                ~cancel ()
+            with Failure msg ->
+              Printf.eprintf "Journal tail %s ended: %s\n%!" src.name msg)
+         )
+       | None -> ())
   ) sources_config.sources;
 
   while not (Atomic.get cancel) do

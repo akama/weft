@@ -216,6 +216,7 @@ weft --base-path /tmp/worktree-2 --sources sources.toml  # another worktree
 | `directory` | `glob` | Glob expand | Per-file | Per-file |
 | `remote` | `transport` + `path` | SSH cat | SSH tail -F (streaming) | Stderr parsing, remote archive fetch |
 | `loki` | `url` + `default_labels` | HTTP query_range | Periodic poll | N/A |
+| `journald` | `unit` (+ optional `transport`) | journalctl JSON | journalctl -f | N/A (journal-managed) |
 
 ## Architecture
 

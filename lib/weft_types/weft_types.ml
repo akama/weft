@@ -54,6 +54,7 @@ type source_type =
   | Directory
   | Remote
   | Loki
+  | Journald
 
 type rotation_style =
   | Rename
@@ -105,6 +106,8 @@ type source_config = {
   url : string option;           (* Loki URL *)
   auth : auth_config;
   default_labels : string option; (* Loki labels *)
+  journal_unit : string option;  (* journald unit name *)
+  journal_filter : string option; (* extra journalctl filter args *)
   format : string;               (* references format by name *)
 }
 

@@ -151,6 +151,7 @@ let parse_source_type = function
   | "directory" -> Directory
   | "remote" -> Remote
   | "loki" -> Loki
+  | "journald" -> Journald
   | s -> failwith (Printf.sprintf "Unknown source type: %s" s)
 
 let parse_source_config tbl =
@@ -165,6 +166,8 @@ let parse_source_config tbl =
     url = get_string_opt tbl "url";
     auth = parse_auth tbl;
     default_labels = get_string_opt tbl "default_labels";
+    journal_unit = get_string_opt tbl "unit";
+    journal_filter = get_string_opt tbl "filter";
     format = get_string tbl "format" ~default:"raw";
   }
 
@@ -224,7 +227,7 @@ let resolve_base_path sources_config =
     in
     let sources = List.map (fun (src : source_config) ->
       match src.source_type with
-      | Remote | Loki -> src
+      | Remote | Loki | Journald -> src
       | File ->
         { src with path = Option.map resolve src.path }
       | Directory ->

@@ -112,11 +112,13 @@ let process_through_pipeline pipeline ~source lines =
   | None ->
     List.filter_map (fun line ->
       if String.length line = 0 then None
-      else Some {
-        timestamp = Ptime_clock.now ();
-        raw = line; source;
-        terms = []; metadata = [];
-      }
+      else
+        let timestamp = match Weft_time.auto_detect line with
+          | Some t -> t
+          | None -> Ptime_clock.now ()
+        in
+        Some { timestamp; raw = line; source;
+               terms = []; metadata = [] }
     ) lines
   | Some pl ->
     Weft_middleware.Pipeline.process_lines pl ~source lines
@@ -349,6 +351,17 @@ let ensure_cached ?t_opt ?time_range adapter cache =
            adapter.name)
 
     | Directory -> ()
+
+    | Journald ->
+      report_status (Printf.sprintf "Fetching journal for %s..." adapter.name);
+      let journald : Weft_source.Journald.t = {
+        config = adapter.config;
+        ssh = adapter.ssh;
+      } in
+      let data = Weft_source.Journald.fetch_to_cache journald ~time_range in
+      if data <> "" then
+        cache_string_data cache ~source_name:adapter.name
+          ~origin:"journald-query" data
   end
 
 (* Read lines for a source — ensure cached, then read overlapping segments *)
