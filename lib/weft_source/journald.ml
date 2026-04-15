@@ -29,11 +29,15 @@ let connect config ~(proc : _ Eio.Process.mgr) ~fs:_ =
 (* Build journalctl args for a query *)
 let build_args config ~time_range ~output_format =
   let unit_name = Option.value ~default:"" config.journal_unit in
-  let base = [
-    "journalctl"; "--no-pager";
-    "-u"; unit_name;
-    "-o"; output_format;
-  ] in
+  (* Use -u for systemd units (.service, .socket, etc.), -t for syslog identifiers *)
+  let unit_args =
+    if String.contains unit_name '.' then
+      ["-u"; unit_name]
+    else
+      ["-t"; unit_name]
+  in
+  let base = ["journalctl"; "--no-pager"] @ unit_args
+    @ ["-o"; output_format] in
   let time_args = match time_range with
     | Some tr ->
       let fmt t =
