@@ -2,7 +2,6 @@
 
 A terminal-based tool for searching and tailing logs across heterogeneous sources — local files, remote hosts (SSH/Teleport), and Loki — presenting results as a unified, time-ordered timeline with live streaming.
 
-![License](https://img.shields.io/badge/license-ISC-blue)
 
 ## Features
 
@@ -254,7 +253,3 @@ weft-gen-logs --dir /tmp/test --count 5000 --rotations 2
 # Live mode with rotation every 60s
 weft-gen-logs --dir /tmp/test --live --interval 200 --rotate-sec 60 --keep 5
 ```
-
-## License
-
-ISC
