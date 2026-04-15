@@ -16,6 +16,7 @@ type mode = Tui | Dump | Live
 type cli_args = {
   formats_path : string option;
   sources_path : string option;
+  base_path : string option;
   initial_terms : string list;
   mode : mode;
   dump_limit : int;
@@ -94,6 +95,7 @@ let parse_cli () =
   let args = ref {
     formats_path = None;
     sources_path = None;
+    base_path = None;
     initial_terms = [];
     mode = Tui;
     dump_limit = 0;
@@ -108,6 +110,8 @@ let parse_cli () =
       args := { !args with formats_path = Some path }; parse rest
     | "--sources" :: path :: rest ->
       args := { !args with sources_path = Some path }; parse rest
+    | "--base-path" :: path :: rest ->
+      args := { !args with base_path = Some path }; parse rest
     | "--search" :: term :: rest | "-s" :: term :: rest ->
       args := { !args with initial_terms = term :: !args.initial_terms }; parse rest
     | "--dump" :: rest ->
@@ -137,6 +141,7 @@ let parse_cli () =
       Printf.printf "Options:\n";
       Printf.printf "  --formats <path>     Path to formats.toml\n";
       Printf.printf "  --sources <path>     Path to sources.toml\n";
+      Printf.printf "  --base-path <dir>    Base directory for relative source paths\n";
       Printf.printf "  -s, --search <term>  Search term (can repeat)\n";
       Printf.printf "  --limit <n>          Max entries for --dump (0 = unlimited)\n";
       Printf.printf "  -h, --help           Show this help\n\n";
@@ -173,6 +178,14 @@ let load_config cli =
   let formats_config = if formats_file = "" then { formats = [] }
     else Weft_config.parse_formats_file formats_file in
   let sources_config = Weft_config.parse_sources_file sources_file in
+  (* CLI --base-path overrides config base_path *)
+  let sources_config = match cli.base_path with
+    | Some bp ->
+      { sources_config with
+        general = { sources_config.general with base_path = Some bp } }
+    | None -> sources_config
+  in
+  let sources_config = Weft_config.resolve_base_path sources_config in
   Weft_config.validate_sources sources_config formats_config;
   (formats_config, sources_config)
 

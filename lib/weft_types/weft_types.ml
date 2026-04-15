@@ -111,6 +111,7 @@ type source_config = {
 type general_config = {
   default_time_range : string;
   reorder_window_ms : int;
+  base_path : string option;
 }
 
 type limits_config = {

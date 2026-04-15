@@ -172,6 +172,7 @@ let parse_general_config tbl =
   {
     default_time_range = get_string tbl "default_time_range" ~default:"1h";
     reorder_window_ms = get_int tbl "reorder_window_ms" ~default:500;
+    base_path = get_string_opt tbl "base_path";
   }
 
 let parse_limits_config tbl =
@@ -211,6 +212,25 @@ let parse_sources_file path =
     | None -> []
   in
   { general; limits; cache; sources }
+
+(* Resolve relative paths in source configs against base_path.
+   Absolute paths and remote/loki sources are left unchanged. *)
+let resolve_base_path sources_config =
+  match sources_config.general.base_path with
+  | None -> sources_config
+  | Some base ->
+    let resolve p =
+      if Filename.is_relative p then Filename.concat base p else p
+    in
+    let sources = List.map (fun (src : source_config) ->
+      match src.source_type with
+      | Remote | Loki -> src
+      | File ->
+        { src with path = Option.map resolve src.path }
+      | Directory ->
+        { src with glob = Option.map resolve src.glob }
+    ) sources_config.sources in
+    { sources_config with sources }
 
 let resolve_format formats_config name =
   List.find_opt (fun (f : format_config) -> f.name = name) formats_config.formats

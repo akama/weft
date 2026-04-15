@@ -85,6 +85,7 @@ Defines where logs are and how to access them:
 ```toml
 [general]
 default_time_range = "1h"
+# base_path = "/opt/myapp"  # prepended to relative source paths
 
 [limits]
 max_ssh_connections = 4
@@ -136,6 +137,28 @@ weft --live -s ERROR ...
 
 # JSON output for piping
 weft --json -s connection ...
+
+# Override base path (for worktrees / multiple environments)
+weft --base-path /tmp/worktree-2 --sources sources.toml ...
+```
+
+### Base path
+
+If your sources.toml uses relative paths, `base_path` (in config or via `--base-path`) is prepended to resolve them. This lets you share one sources.toml across multiple environments:
+
+```toml
+# sources.toml — works with any --base-path
+[[source]]
+name = "api"
+type = "file"
+path = "logs/api.log"
+format = "app"
+```
+
+```bash
+weft --base-path /opt/myapp --sources sources.toml       # production
+weft --base-path /tmp/worktree-1 --sources sources.toml  # dev worktree
+weft --base-path /tmp/worktree-2 --sources sources.toml  # another worktree
 ```
 
 ### Time specs
