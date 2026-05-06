@@ -73,16 +73,26 @@ let establish (proc : _ Eio.Process.mgr) t =
                    (Printexc.to_string exn)))
   end
 
+(* Shell-quote a string for safe passage through a remote shell.
+   SSH concatenates remote args with spaces and passes them to the
+   user's login shell, so args containing spaces must be quoted. *)
+let shell_quote s =
+  if String.contains s ' ' || String.contains s '\'' || String.contains s '"'
+  then "'" ^ String.concat "'\\''" (String.split_on_char '\'' s) ^ "'"
+  else s
+
 let run_command t args =
   let (base, host_args) = parse_transport t.transport_cmd in
   let is_tsh = base = "tsh" in
+  (* Quote remote args so they survive the remote shell *)
+  let quoted_args = List.map shell_quote args in
   let cmd = if is_tsh then
-    [base] @ host_args @ args
+    [base] @ host_args @ quoted_args
   else
     ["ssh";
      "-o"; Printf.sprintf "ControlPath=%s" t.control_path;
      "-o"; "ControlMaster=auto"]
-    @ host_args @ args
+    @ host_args @ quoted_args
   in
   match t.run with
   | Some run -> run cmd
