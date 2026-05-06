@@ -42,7 +42,7 @@ let build_args config ~time_range ~output_format =
     | Some tr ->
       let fmt t =
         let ((y, mo, d), ((hh, mm, ss), _tz)) = Ptime.to_date_time t in
-        Printf.sprintf "%04d-%02d-%02d %02d:%02d:%02d" y mo d hh mm ss
+        Printf.sprintf "%04d-%02d-%02dT%02d:%02d:%02d" y mo d hh mm ss
       in
       let since = ["--since"; fmt tr.start_] in
       let until_ = match tr.end_ with
